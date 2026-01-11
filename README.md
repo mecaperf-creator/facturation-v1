@@ -1,4 +1,4 @@
-# Facturation Atelier (V1.3.0)
+# Facturation Atelier (Facturation Atelier (V1.4.2 OCR gratuit)
 
 ## Objectif
 Saisir un dossier véhicule (immat/km/marque/modèle/mécano), archiver les documents (100 points, fiche A5, BL),
@@ -22,3 +22,9 @@ Sur iPhone: Partager / Imprimer → “Enregistrer en PDF”.
 
 ## Déploiement GitHub Pages
 Settings → Pages → Branch: main → /(root)
+
+
+## OCR gratuit (Tesseract.js)
+- Nécessite Internet (chargement du moteur + langue).
+- Sur iPhone, l’OCR peut prendre 10–60s selon la photo.
+- Toujours vérifier/corriger les résultats.

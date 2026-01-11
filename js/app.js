@@ -351,11 +351,16 @@ function render() {
   else if(step === 'ocr_a5') {
     renderCard(`
       <h2>Travaux (saisie rapide)</h2>
+      <div id="ocrProgress" class="small" style="margin-top:8px"></div>
+
+      <button class="secondary no-print" onclick="doOcrA5()">🔍 Lancer OCR (gratuit) sur la photo A5</button>
+      <div class="small">Si ça ne bouge pas : vérifier la connexion Internet. L’OCR peut prendre jusqu’à 60s.</div>
+
       <div id="ocrProgress" class="small"></div>
       <button class="secondary no-print" onclick="doOcrA5()">🔍 Lancer OCR sur la photo A5</button>
       <div class="small">Astuce : photo bien à plat, bien cadrée, bonne lumière.</div>
 
-      <div class="small">OCR sera branché ensuite. Pour l’instant : saisir/corriger.</div>
+      <div class="small">OCR gratuit disponible : appuie sur “Lancer OCR”, puis corrige si besoin.</div>
       <label>Travaux / éléments montés</label>
       <textarea id="a5txt" placeholder="Ex: Triangle suspension G 1h\nTriangle suspension D 1h">${state.or_a5.ocr_text || ''}</textarea>
       <div class="actions">
@@ -421,6 +426,11 @@ async function doOcrA5(){
   else if(step === 'ocr_bl') {
     renderCard(`
       <h2>BL (saisie rapide)</h2>
+      <div id="ocrProgress" class="small" style="margin-top:8px"></div>
+
+      <button class="secondary no-print" onclick="doOcrBL()">🔍 Lancer OCR (gratuit) sur BL (page 1)</button>
+      <div class="small">Après OCR : ouvrir “Générer facture” et vérifier les pièces.</div>
+
       <div id="ocrProgress" class="small"></div>
       <button class="secondary no-print" onclick="doOcrBL()">🔍 Lancer OCR sur BL (page 1)</button>
       <div class="small">Ensuite : ouvre “Générer facture” pour vérifier les pièces.</div>
