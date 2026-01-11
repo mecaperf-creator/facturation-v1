@@ -4,6 +4,15 @@ const progress = document.getElementById('progress');
 const BRAND_MODELS = {"PEUGEOT": ["108", "208", "308", "2008", "3008", "508", "Partner", "Expert", "Boxer"], "CITROËN": ["C1", "C3", "C4", "C5", "Berlingo", "Jumpy", "Jumper", "DS3"], "RENAULT": ["Clio", "Mégane", "Captur", "Scénic", "Twingo", "Kangoo", "Trafic", "Master"], "VOLKSWAGEN": ["Polo", "Golf", "Passat", "Tiguan", "Touran", "Transporter"], "AUDI": ["A1", "A3", "A4", "A6", "Q2", "Q3", "Q5"], "BMW": ["Série 1", "Série 3", "Série 5", "X1", "X3", "X5"], "MERCEDES": ["Classe A", "Classe B", "Classe C", "Classe E", "GLA", "GLC", "Vito", "Sprinter"], "FORD": ["Fiesta", "Focus", "Puma", "Kuga", "Transit", "Tourneo"], "OPEL": ["Corsa", "Astra", "Mokka", "Insignia", "Vivaro"], "TOYOTA": ["Yaris", "Corolla", "C-HR", "RAV4", "Proace"], "NISSAN": ["Micra", "Qashqai", "Juke", "X-Trail", "NV200"], "HYUNDAI": ["i10", "i20", "i30", "Tucson", "Kona"], "KIA": ["Picanto", "Rio", "Ceed", "Sportage", "Niro"], "SKODA": ["Fabia", "Octavia", "Superb", "Kodiaq", "Kamiq"], "SEAT": ["Ibiza", "Leon", "Arona", "Ateca"], "FIAT": ["500", "Panda", "Tipo", "Ducato"], "TESLA": ["Model 3", "Model Y", "Model S", "Model X"], "AUTRE": []};
 
 const DEFAULT_STATE = {
+  _meta: { created_at: '' },
+  facture: {
+    taux_mo: 60.00,
+    tva_tx: 20.00,
+    mode_reglement: 'Virement',
+    lignes_mo: [],
+    lignes_pieces: [],
+    lignes_forfait: []
+  },
   vehicule: { immat:'', immat_raw:'', km:'', marque:'', modele:'', mecano:'' },
   controles: { points100_done:false, photo_points100_id:null },
   or_a5: { photo_a5_id:null, ocr_text:'' },
@@ -42,6 +51,8 @@ function next() {
   render();
 }
 function back() {
+  if(state._ui && state._ui.show_facture){ closeFacture(); return; }
+
   stepIndex = Math.max(stepIndex - 1, 0);
   persist();
   render();
@@ -177,6 +188,8 @@ function badgeOk(cond) {
 }
 
 function render() {
+  if(state._ui && state._ui.show_facture){ renderFacture(); return; }
+
   setProgress();
   renderBottomBar();
   const step = steps[stepIndex];
@@ -338,6 +351,10 @@ function render() {
   else if(step === 'ocr_a5') {
     renderCard(`
       <h2>Travaux (saisie rapide)</h2>
+      <div id="ocrProgress" class="small"></div>
+      <button class="secondary no-print" onclick="doOcrA5()">🔍 Lancer OCR sur la photo A5</button>
+      <div class="small">Astuce : photo bien à plat, bien cadrée, bonne lumière.</div>
+
       <div class="small">OCR sera branché ensuite. Pour l’instant : saisir/corriger.</div>
       <label>Travaux / éléments montés</label>
       <textarea id="a5txt" placeholder="Ex: Triangle suspension G 1h\nTriangle suspension D 1h">${state.or_a5.ocr_text || ''}</textarea>
@@ -346,6 +363,24 @@ function render() {
         <button onclick="saveA5Text()">Suivant</button>
       </div>
     `);
+
+async function doOcrA5(){
+  try{
+    const id = state.or_a5.photo_a5_id;
+    if(!id) return alert('Aucune photo A5.');
+    const txt = await runOcrOnFileId(id,'fra');
+    const cleaned = cleanOcrText(txt);
+    const ta = document.getElementById('a5txt');
+    if(ta) ta.value = cleaned;
+    state.or_a5.ocr_text = cleaned;
+    await persist();
+    alert('OCR A5 terminé. Vérifie et corrige si besoin.');
+  } catch(e){
+    alert('OCR A5: ' + (e.message||e));
+  }
+}
+
+
   }
   else if(step === 'pieces_question') {
     renderCard(`
@@ -386,6 +421,10 @@ function render() {
   else if(step === 'ocr_bl') {
     renderCard(`
       <h2>BL (saisie rapide)</h2>
+      <div id="ocrProgress" class="small"></div>
+      <button class="secondary no-print" onclick="doOcrBL()">🔍 Lancer OCR sur BL (page 1)</button>
+      <div class="small">Ensuite : ouvre “Générer facture” pour vérifier les pièces.</div>
+
       <div class="small">OCR sera branché ensuite. Pour l’instant : saisir/colle les lignes.</div>
       <label>Lignes BL</label>
       <textarea id="bltxt" placeholder="Ex: Plaquettes AR — 28,58 €">${state.bl.ocr_text || ''}</textarea>
@@ -394,6 +433,35 @@ function render() {
         <button onclick="saveBLText()">Suivant</button>
       </div>
     `);
+
+async function doOcrBL(){
+  try{
+    const ids = state.bl.photo_bl_ids || [];
+    if(ids.length===0) return alert('Aucune photo BL.');
+    const txt = await runOcrOnFileId(ids[0],'fra');
+    const cleaned = cleanOcrText(txt);
+    const parsed = parseBLTextToPieces(cleaned);
+
+    const ta = document.getElementById('bltxt');
+    if(ta) ta.value = parsed.linesText || cleaned;
+
+    state.bl.ocr_text = parsed.linesText || cleaned;
+
+    state.facture.lignes_pieces = (parsed.pieces || []).map(p => ({
+      desc: p.desc,
+      qty: p.qty,
+      achat_ht: round2(p.achat_ht),
+      marge: 10
+    }));
+
+    await persist();
+    alert('OCR BL terminé. Vérifie les lignes sur la facture.');
+  } catch(e){
+    alert('OCR BL: ' + (e.message||e));
+  }
+}
+
+
   }
   else if(step === 'recap') {
     renderCard(`
@@ -519,4 +587,263 @@ function renderBottomBar() {
 async function resumeDraft() {
   await restore();
   render();
+}
+
+
+function round2(n){return Math.round((Number(n)||0)*100)/100}
+function fmtEuro(n){return round2(n).toFixed(2).replace('.',',')}
+
+const BAREMES_MO = [
+  { key:'controle_100', label:'Contrôle 100 points', h:0.50 },
+  { key:'vidange_filtre', label:'Vidange + filtre huile', h:1.00 },
+  { key:'vidange_tous_filtres', label:'Vidange + tous filtres', h:2.00 },
+  { key:'plaquettes_av', label:'Plaquettes avant', h:1.00 },
+  { key:'plaquettes_ar', label:'Plaquettes arrière', h:1.00 },
+  { key:'disques_plaquettes_av', label:'Disques + plaquettes avant', h:2.00 },
+  { key:'disques_plaquettes_ar', label:'Disques + plaquettes arrière', h:2.00 },
+  { key:'triangle_susp', label:'Triangle de suspension (par côté)', h:1.00 },
+  { key:'balais', label:'Balais essuie-glace (avant+arrière)', h:0.15 }
+];
+function rebuildAutoMOLines(){
+  // rebuild MO lines from known flags; keep manual lines added by user
+  const taux = Number(state.facture.taux_mo)||60;
+  const lines = [];
+  // contrôle 100 points si photo/flag
+  if(state.docs && state.docs.ctrl100 && state.docs.ctrl100.length>0){
+    const b = BAREMES_MO.find(x=>x.key==='controle_100');
+    lines.push({label:b.label, h:b.h, pu:taux, total: round2(b.h*taux)});
+  }
+  state.facture.lignes_mo = lines;
+}
+
+function addPieceLine(){
+  state.facture.lignes_pieces.push({desc:'', qty:1, achat_ht:0, marge:10});
+  persistAndRender();
+}
+function removePieceLine(i){
+  state.facture.lignes_pieces.splice(i,1);
+  persistAndRender();
+}
+function updatePiece(i, field, val){
+  const l = state.facture.lignes_pieces[i];
+  if(!l) return;
+  l[field] = (field==='desc') ? val : Number(val);
+  persistAndRender();
+}
+function addMOLineFromBareme(){
+  const key = document.getElementById('baremeSel').value;
+  const qty = Number(document.getElementById('baremeQty').value||1);
+  const b = BAREMES_MO.find(x=>x.key===key);
+  if(!b) return;
+  const taux = Number(state.facture.taux_mo)||60;
+  state.facture.lignes_forfait.push({label:`${b.label} x${qty}`, h: round2(b.h*qty), pu:taux, total: round2(b.h*qty*taux)});
+  persistAndRender();
+}
+function removeForfait(i){
+  state.facture.lignes_forfait.splice(i,1);
+  persistAndRender();
+}
+function computeTotals(){
+  const mo = [...(state.facture.lignes_mo||[]), ...(state.facture.lignes_forfait||[])]
+    .reduce((s,l)=>s+round2(l.total||0),0);
+  const pieces = (state.facture.lignes_pieces||[]).reduce((s,l)=>{
+    const qty = Number(l.qty)||0;
+    const achat = Number(l.achat_ht)||0;
+    const vente = round2(achat*1.10); // +10%
+    return s + round2(qty*vente);
+  },0);
+  const ht = round2(mo+pieces);
+  const tva = round2(ht*(Number(state.facture.tva_tx||0)/100));
+  const ttc = round2(ht+tva);
+  return {mo,pieces,ht,tva,ttc};
+}
+function renderFacture(){
+  rebuildAutoMOLines();
+  const t = computeTotals();
+  const opts = BAREMES_MO.map(b=>`<option value="${b.key}">${b.label} (${b.h.toFixed(2)} h)</option>`).join('');
+  const piecesRows = (state.facture.lignes_pieces||[]).map((l,i)=>{
+    const achat = Number(l.achat_ht)||0;
+    const vente = round2(achat*1.10);
+    const qty = Number(l.qty)||0;
+    const total = round2(qty*vente);
+    return `
+      <tr>
+        <td><input value="${l.desc||''}" oninput="updatePiece(${i},'desc',this.value)" placeholder="Désignation"></td>
+        <td style="width:70px"><input type="number" value="${qty}" oninput="updatePiece(${i},'qty',this.value)"></td>
+        <td style="width:120px"><input type="number" value="${achat}" oninput="updatePiece(${i},'achat_ht',this.value)" step="0.01"></td>
+        <td style="width:120px">${fmtEuro(vente)}</td>
+        <td style="width:120px">${fmtEuro(total)}</td>
+        <td style="width:46px"><button class="ghost no-print" onclick="removePieceLine(${i})">✕</button></td>
+      </tr>
+    `;
+  }).join('');
+  const moRows = [...(state.facture.lignes_mo||[]), ...(state.facture.lignes_forfait||[])].map((l,i)=>`
+    <tr>
+      <td>${l.label}</td>
+      <td style="width:90px">${l.h.toFixed(2)}</td>
+      <td style="width:120px">${fmtEuro(l.pu)}</td>
+      <td style="width:120px">${fmtEuro(l.total)}</td>
+      ${state.facture.lignes_forfait.includes(l) ? `<td style="width:46px"><button class="ghost no-print" onclick="removeForfait(${i - (state.facture.lignes_mo||[]).length})">✕</button></td>` : '<td></td>'}
+    </tr>
+  `).join('');
+
+  renderCard(`
+    <div class="no-print">
+      <h2>Facture (auto)</h2>
+      <div class="small">Client: <b>MIKADAN</b> – 467 avenue Jean Moulin – 60880 Jaux</div>
+      <div class="grid2">
+        <div>
+          <label>Taux MO (€ HT/h)</label>
+          <input type="number" step="0.01" value="${state.facture.taux_mo}" oninput="state.facture.taux_mo=Number(this.value); persistAndRender();">
+        </div>
+        <div>
+          <label>TVA (%)</label>
+          <input type="number" step="0.01" value="${state.facture.tva_tx}" oninput="state.facture.tva_tx=Number(this.value); persistAndRender();">
+        </div>
+      </div>
+      <label>Mode de règlement</label>
+      <select onchange="state.facture.mode_reglement=this.value; persistAndRender();">
+        ${['Virement','CB','Espèces','Chèque'].map(x=>`<option ${state.facture.mode_reglement===x?'selected':''}>${x}</option>`).join('')}
+      </select>
+      <hr>
+    </div>
+
+    <h3>Main-d’œuvre</h3>
+    <table>
+      <thead><tr><th>Désignation</th><th>Temps (h)</th><th>PU</th><th>Total HT</th><th class="no-print"></th></tr></thead>
+      <tbody>${moRows || '<tr><td colspan="5" class="small">Aucune ligne MO automatique pour l’instant.</td></tr>'}</tbody>
+    </table>
+
+    <div class="no-print" style="margin-top:10px">
+      <div class="grid2">
+        <div>
+          <label>Ajouter une intervention (barème)</label>
+          <select id="baremeSel">${opts}</select>
+        </div>
+        <div>
+          <label>Quantité</label>
+          <input id="baremeQty" type="number" value="1" step="1" min="1">
+        </div>
+      </div>
+      <button onclick="addMOLineFromBareme()">➕ Ajouter intervention</button>
+    </div>
+
+    <hr>
+    <h3>Pièces (achat HT → vente HT = +10%)</h3>
+    <table>
+      <thead><tr><th>Désignation</th><th>Qté</th><th>Achat HT</th><th>Vente HT</th><th>Total HT</th><th class="no-print"></th></tr></thead>
+      <tbody>${piecesRows || '<tr><td colspan="6" class="small">Ajoute les pièces du BL (saisies rapides).</td></tr>'}</tbody>
+    </table>
+    <div class="no-print">
+      <button onclick="addPieceLine()">➕ Ajouter pièce</button>
+    </div>
+
+    <hr>
+    <h3>Totaux</h3>
+    <table>
+      <tbody>
+        <tr><td>Total MO HT</td><td style="text-align:right">${fmtEuro(t.mo)}</td></tr>
+        <tr><td>Total Pièces HT</td><td style="text-align:right">${fmtEuro(t.pieces)}</td></tr>
+        <tr><td><b>Total HT</b></td><td style="text-align:right"><b>${fmtEuro(t.ht)}</b></td></tr>
+        <tr><td>TVA (${Number(state.facture.tva_tx||0).toFixed(2)}%)</td><td style="text-align:right">${fmtEuro(t.tva)}</td></tr>
+        <tr><td style="font-size:18px"><b>Net à payer</b></td><td style="text-align:right;font-size:18px"><b>${fmtEuro(t.ttc)}</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="print-only" style="margin-top:14px">
+      <div><b>Mode de règlement:</b> ${state.facture.mode_reglement}</div>
+      <div><b>IBAN:</b> FR76 1627 5000 1108 0005 2907 889</div>
+      <div><b>BIC:</b> CEPAFRPP627</div>
+      <div class="small">Mécano: ${state.vehicule?.mecano || ''} — Véhicule: ${state.vehicule?.marque||''} ${state.vehicule?.modele||''} — Immat: ${state.vehicule?.immat||''} — KM: ${state.vehicule?.km||''}</div>
+    </div>
+
+    <div class="no-print" style="display:flex;gap:10px">
+      <button class="ghost" onclick="back()">← Retour</button>
+      <button onclick="openPrint()">🧾 Générer PDF</button>
+    </div>
+  `);
+}
+function openPrint(){
+  // Use print CSS; just call window.print
+  window.print();
+}
+
+function gotoFacture(){
+  // push a virtual step by setting stepIndex to render facture
+  state._ui = state._ui || {};
+  state._ui.show_facture = true;
+  persistAndRender();
+}
+
+function closeFacture(){
+  if(state._ui) state._ui.show_facture = false;
+  persistAndRender();
+}
+
+function persistAndRender(){
+  save();
+  render();
+}
+
+async function runOcrOnFileId(fileId, lang='fra') {
+  const blob = await getFileBlob(fileId);
+  if(!blob) throw new Error('Image introuvable');
+  const url = URL.createObjectURL(blob);
+
+  if(!window.Tesseract) throw new Error("OCR non chargé (Tesseract.js). Vérifie la connexion Internet.");
+  const prog = document.getElementById('ocrProgress');
+  const worker = await Tesseract.createWorker(lang, 1, {
+    logger: m => { if(prog && m.status) prog.textContent = `${m.status} ${Math.round((m.progress||0)*100)}%`; }
+  });
+  try{
+    const { data } = await worker.recognize(url);
+    return (data && data.text) ? data.text : '';
+  } finally {
+    await worker.terminate();
+    URL.revokeObjectURL(url);
+    if(prog) prog.textContent = '';
+  }
+}
+
+function cleanOcrText(t){
+  return (t||'')
+    .replace(/\r/g,'')
+    .replace(/[\u00A0]/g,' ')
+    .replace(/[ ]{2,}/g,' ')
+    .trim();
+}
+
+function parseBLTextToPieces(rawText){
+  const text = cleanOcrText(rawText);
+  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+
+  const pieces = [];
+  const keepLines = [];
+  const amtRe = /(\d+[\.,]\d{2})/g;
+
+  for (const l of lines) {
+    if (/\b(total|tva|ttc|ht|montant\s*total|facture|bon\s*de\s*livraison|remise)\b/i.test(l)) continue;
+
+    const amts = l.match(amtRe);
+    if (!amts || amts.length === 0) continue;
+
+    const amtStr = amts[amts.length-1].replace(',', '.');
+    const amt = Number(amtStr);
+    if (!isFinite(amt) || amt <= 0) continue;
+
+    let qty = 1;
+    const qtyMatch = l.match(/\b(\d{1,2})\b/);
+    if (qtyMatch) {
+      const q = Number(qtyMatch[1]);
+      if (q >= 1 && q <= 99) qty = q;
+    }
+
+    let desc = l.replace(amtRe, '').replace(/\s{2,}/g,' ').trim();
+    if (desc.length < 3) desc = l;
+
+    keepLines.push(`${qty} x ${desc} — ${amt.toFixed(2)} HT`);
+    pieces.push({ desc, qty, achat_ht: round2(amt/qty) });
+  }
+
+  return { linesText: keepLines.join('\n'), pieces };
 }
