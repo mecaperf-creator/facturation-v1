@@ -376,7 +376,7 @@ async function doOcrA5(){
     await persist();
     alert('OCR A5 terminé. Vérifie et corrige si besoin.');
   } catch(e){
-    alert('OCR A5: ' + (e.message||e));
+    showOcrError('OCR A5: ' + (e.message||e));
   }
 }
 
@@ -457,7 +457,7 @@ async function doOcrBL(){
     await persist();
     alert('OCR BL terminé. Vérifie les lignes sur la facture.');
   } catch(e){
-    alert('OCR BL: ' + (e.message||e));
+    showOcrError('OCR BL: ' + (e.message||e));
   }
 }
 
@@ -788,18 +788,30 @@ function persistAndRender(){
 async function runOcrOnFileId(fileId, lang='fra') {
   const blob = await getFileBlob(fileId);
   if(!blob) throw new Error('Image introuvable');
-  const url = URL.createObjectURL(blob);
 
-  if(!window.Tesseract) throw new Error("OCR non chargé (Tesseract.js). Vérifie la connexion Internet.");
+  const url = URL.createObjectURL(blob);
+  if(!window.Tesseract) throw new Error("OCR non chargé. Vérifie la connexion Internet.");
+
   const prog = document.getElementById('ocrProgress');
-  const worker = await Tesseract.createWorker(lang, 1, {
-    logger: m => { if(prog && m.status) prog.textContent = `${m.status} ${Math.round((m.progress||0)*100)}%`; }
-  });
+  if(prog) prog.textContent = 'Préparation OCR…';
+
   try{
-    const { data } = await worker.recognize(url);
-    return (data && data.text) ? data.text : '';
+    const result = await Tesseract.recognize(
+      url,
+      lang,
+      {
+        logger: m => {
+          if(!prog) return;
+          if(m && m.status){
+            const pct = m.progress != null ? ` ${Math.round(m.progress*100)}%` : '';
+            prog.textContent = `${m.status}${pct}`;
+          }
+        },
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0'
+      }
+    );
+    return (result && result.data && result.data.text) ? result.data.text : '';
   } finally {
-    await worker.terminate();
     URL.revokeObjectURL(url);
     if(prog) prog.textContent = '';
   }
@@ -846,4 +858,13 @@ function parseBLTextToPieces(rawText){
   }
 
   return { linesText: keepLines.join('\n'), pieces };
+}
+
+function showOcrError(msg){
+  const prog = document.getElementById('ocrProgress');
+  if(prog){
+    prog.textContent = '❌ ' + msg;
+  } else {
+    alert(msg);
+  }
 }
