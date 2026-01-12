@@ -379,7 +379,10 @@ function render() {
       <h2>Travaux (saisie rapide)</h2>
       <div id="ocrProgress" class="small" style="margin-top:8px"></div>
 
-      <button class="secondary no-print" onclick="doOcrA5()">🔍 Lancer OCR (gratuit) sur la photo A5</button>
+      <label class="secondary no-print" style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:14px 16px;border-radius:12px;border:1px solid #ddd;cursor:pointer;width:100%;max-width:520px;">
+  🔍 OCR (photo A5)
+  <input id="a5OcrInput" type="file" accept="image/*" style="display:none" onchange="handleOcrInputA5(this.files)" />
+</label>
       <div class="small">Si ça ne bouge pas : vérifier la connexion Internet. L’OCR peut prendre jusqu’à 60s.</div>
 
       <div id="ocrProgress" class="small"></div>
@@ -464,7 +467,10 @@ async function doOcrA5(){
       <h2>BL (saisie rapide)</h2>
       <div id="ocrProgress" class="small" style="margin-top:8px"></div>
 
-      <button class="secondary no-print" onclick="doOcrBL()">🔍 Lancer OCR (gratuit) sur BL (page 1)</button>
+      <label class="secondary no-print" style="display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:14px 16px;border-radius:12px;border:1px solid #ddd;cursor:pointer;width:100%;max-width:520px;">
+  🔍 OCR (photo BL)
+  <input id="blOcrInput" type="file" accept="image/*" style="display:none" onchange="handleOcrInputBL(this.files)" />
+</label>
       <div class="small">Après OCR : ouvrir “Générer facture” et vérifier les pièces.</div>
 
       <div id="ocrProgress" class="small"></div>
@@ -921,5 +927,38 @@ function showOcrError(msg){
     prog.textContent = '❌ ' + msg;
   } else {
     alert(msg);
+  }
+}
+
+async function handleOcrInputA5(files){
+  try{
+    if(!files || files.length===0) return;
+    const file = files[0];
+    const blob = file instanceof Blob ? file : new Blob([file]);
+    if(typeof saveFileBlob !== 'function') throw new Error('Fonction saveFileBlob manquante');
+    const id = await saveFileBlob(blob, `A5_${Date.now()}.jpg`);
+    state.or_a5 = state.or_a5 || {};
+    state.or_a5.photo_a5_id = id;
+    await persist();
+    await doOcrA5();
+  } catch(e){
+    showOcrError('Photo A5/OCR: ' + (e.message||e));
+  }
+}
+
+async function handleOcrInputBL(files){
+  try{
+    if(!files || files.length===0) return;
+    const file = files[0];
+    const blob = file instanceof Blob ? file : new Blob([file]);
+    if(typeof saveFileBlob !== 'function') throw new Error('Fonction saveFileBlob manquante');
+    const id = await saveFileBlob(blob, `BL_${Date.now()}.jpg`);
+    state.bl = state.bl || {};
+    state.bl.photo_bl_ids = state.bl.photo_bl_ids || [];
+    state.bl.photo_bl_ids.push(id);
+    await persist();
+    await doOcrBL();
+  } catch(e){
+    showOcrError('Photo BL/OCR: ' + (e.message||e));
   }
 }

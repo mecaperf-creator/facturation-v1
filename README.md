@@ -1,3 +1,7 @@
+Facturation Atelier — V1.4.4 (OCR iOS Safe)
+
+- Bouton OCR iPhone compatible (sélecteur photo natif)
+
 # Facturation Atelier (Facturation Atelier (V1.4.2 OCR gratuit)
 
 ## Objectif
