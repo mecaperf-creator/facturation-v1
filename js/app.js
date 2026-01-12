@@ -95,6 +95,32 @@ async function setFileBlob(fileId, blob) {
   await idbSet('files', fileId, blob);
 }
 
+async function pickImageBlob() {
+  return await new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    // Pas de "capture" => iPhone propose Caméra OU Photothèque
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    document.body.appendChild(input);
+
+    input.onchange = () => {
+      try{
+        const file = input.files && input.files[0];
+        document.body.removeChild(input);
+        if(!file) return reject(new Error('Aucune image sélectionnée'));
+        resolve(file);
+      } catch(e){
+        reject(e);
+      }
+    };
+
+    // iOS/Safari : le click doit être déclenché dans le handler utilisateur
+    input.click();
+  });
+}
+
 async function renderThumb(fileId) {
   if(!fileId) return '';
   const blob = await getFileBlob(fileId);
@@ -371,8 +397,18 @@ function render() {
 
 async function doOcrA5(){
   try{
+    // Si pas de photo A5, on ouvre la caméra/photothèque
+    if(!state.or_a5.photo_a5_id){
+      const file = await pickImageBlob();
+      const id = 'a5_' + Date.now();
+      await setFileBlob(id, file);
+      state.or_a5.photo_a5_id = id;
+      await persist();
+      // refresh UI so thumbnail appears
+      render();
+    }
+
     const id = state.or_a5.photo_a5_id;
-    if(!id) return alert('Aucune photo A5.');
     const txt = await runOcrOnFileId(id,'fra');
     const cleaned = cleanOcrText(txt);
     const ta = document.getElementById('a5txt');
@@ -435,7 +471,7 @@ async function doOcrA5(){
       <button class="secondary no-print" onclick="doOcrBL()">🔍 Lancer OCR sur BL (page 1)</button>
       <div class="small">Ensuite : ouvre “Générer facture” pour vérifier les pièces.</div>
 
-      <div class="small">OCR sera branché ensuite. Pour l’instant : saisir/colle les lignes.</div>
+      <div class="small">OCR gratuit : clique “Lancer OCR”, choisis Caméra/Photos, puis corrige si besoin.</div>
       <label>Lignes BL</label>
       <textarea id="bltxt" placeholder="Ex: Plaquettes AR — 28,58 €">${state.bl.ocr_text || ''}</textarea>
       <div class="actions">
@@ -446,8 +482,17 @@ async function doOcrA5(){
 
 async function doOcrBL(){
   try{
+    // Si pas de photo BL, on ouvre la caméra/photothèque
+    if(!state.bl.photo_bl_ids || state.bl.photo_bl_ids.length===0){
+      const file = await pickImageBlob();
+      const id = 'bl_' + Date.now();
+      await setFileBlob(id, file);
+      state.bl.photo_bl_ids = [id];
+      await persist();
+      render();
+    }
+
     const ids = state.bl.photo_bl_ids || [];
-    if(ids.length===0) return alert('Aucune photo BL.');
     const txt = await runOcrOnFileId(ids[0],'fra');
     const cleaned = cleanOcrText(txt);
     const parsed = parseBLTextToPieces(cleaned);
