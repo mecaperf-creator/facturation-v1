@@ -184,7 +184,7 @@
         <h2 style="margin:0 0 8px">Kilométrage</h2>
         <label>Km</label>
         <input id="km" inputmode="numeric" placeholder="ex: 139634" value="${escapeHtml(state.vehicule.km || '')}" />
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.km)}
+        ${navButtons('Suivant', 'Retour', true)}
       </div>`;
   }
   function stepMarque(){
