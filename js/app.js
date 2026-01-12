@@ -1,724 +1,849 @@
-(function(){
-  'use strict';
 
-  window.addEventListener('error', function(e){
-    showFatal("Erreur JS: " + (e && e.message ? e.message : "inconnue"));
-  });
-  window.addEventListener('unhandledrejection', function(e){
-    showFatal("Erreur Promise: " + (e && e.reason ? String(e.reason) : "inconnue"));
-  });
+const screen = document.getElementById('screen');
+const progress = document.getElementById('progress');
+const BRAND_MODELS = {"PEUGEOT": ["108", "208", "308", "2008", "3008", "508", "Partner", "Expert", "Boxer"], "CITROËN": ["C1", "C3", "C4", "C5", "Berlingo", "Jumpy", "Jumper", "DS3"], "RENAULT": ["Clio", "Mégane", "Captur", "Scénic", "Twingo", "Kangoo", "Trafic", "Master"], "VOLKSWAGEN": ["Polo", "Golf", "Passat", "Tiguan", "Touran", "Transporter"], "AUDI": ["A1", "A3", "A4", "A6", "Q2", "Q3", "Q5"], "BMW": ["Série 1", "Série 3", "Série 5", "X1", "X3", "X5"], "MERCEDES": ["Classe A", "Classe B", "Classe C", "Classe E", "GLA", "GLC", "Vito", "Sprinter"], "FORD": ["Fiesta", "Focus", "Puma", "Kuga", "Transit", "Tourneo"], "OPEL": ["Corsa", "Astra", "Mokka", "Insignia", "Vivaro"], "TOYOTA": ["Yaris", "Corolla", "C-HR", "RAV4", "Proace"], "NISSAN": ["Micra", "Qashqai", "Juke", "X-Trail", "NV200"], "HYUNDAI": ["i10", "i20", "i30", "Tucson", "Kona"], "KIA": ["Picanto", "Rio", "Ceed", "Sportage", "Niro"], "SKODA": ["Fabia", "Octavia", "Superb", "Kodiaq", "Kamiq"], "SEAT": ["Ibiza", "Leon", "Arona", "Ateca"], "FIAT": ["500", "Panda", "Tipo", "Ducato"], "TESLA": ["Model 3", "Model Y", "Model S", "Model X"], "AUTRE": []};
 
-  const STORAGE_KEY = 'FACTU_DOSSIER_V1_4_5';
-  const TVA = 0.20;
-  const TAUX_HORAIRE = 60.00;
-  const MARGE_PIECES = 0.10;
+const DEFAULT_STATE = {
+  _meta: { created_at: '' },
+  facture: {
+    taux_mo: 60.00,
+    tva_tx: 20.00,
+    mode_reglement: 'Virement',
+    lignes_mo: [],
+    lignes_pieces: [],
+    lignes_forfait: []
+  },
+  vehicule: { immat:'', immat_raw:'', km:'', marque:'', modele:'', mecano:'' },
+  controles: { points100_done:false, photo_points100_id:null },
+  or_a5: { photo_a5_id:null, ocr_text:'' },
+  bl: { required:false, photo_bl_ids:[], ocr_text:'' },
+};
 
-  const DEFAULT_STATE = {
-    version: '1.4.5',
-    created_at: new Date().toISOString(),
-    etape: 1,
-    vehicule: { immat_raw:'', immat:'', km:'', marque:'', modele:'', mecano:'SYLVAIN' },
-    controle100: { fait:false, photo:null },
-    a5: { photo:null, texte:'' },
-    bl: { photos: [], lignes:'' },
-    divers: { autres_interventions:'' },
-    facture: { lignes: [] }
-  };
+let state = JSON.parse(JSON.stringify(DEFAULT_STATE));
+let stepIndex = 0;
 
-  let SAVED_STATE = null;
+const steps = [
+  'immat','immat_confirm','km','marque','modele','mecano',
+  'points100','photo_points100',
+  'photo_a5','ocr_a5',
+  'pieces_question','photo_bl','ocr_bl',
+  'recap'
+];
 
+function setProgress() {
+  progress.textContent = `Étape ${stepIndex+1}/${steps.length}`;
+}
 
-  const marques = [
-    'AUDI','BMW','CITROEN','DACIA','FIAT','FORD','HONDA','HYUNDAI','KIA','MAZDA','MERCEDES','MINI','NISSAN',
-    'OPEL','PEUGEOT','RENAULT','SEAT','SKODA','TOYOTA','VOLKSWAGEN','VOLVO','AUTRE'
-  ];
+function renderCard(innerHtml) {
+  screen.innerHTML = `<div class="card">${innerHtml}</div>`;
+}
 
-  function structuredClone(obj){ return JSON.parse(JSON.stringify(obj)); }
+function showError(msg) {
+  const el = document.createElement('div');
+  el.className = 'error';
+  el.textContent = msg;
+  screen.appendChild(el);
+}
 
-  function loadState(){
-    try{
-      const s = localStorage.getItem(STORAGE_KEY);
-      if(!s) { SAVED_STATE = null; return structuredClone(DEFAULT_STATE); }
-      // On démarre toujours à l'étape 1 (immatriculation).
-      // Le dossier précédent reste accessible via "Reprendre dossier".
-      SAVED_STATE = Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(s));
-      return structuredClone(DEFAULT_STATE);
-    }catch(e){
-      SAVED_STATE = null;
-      return structuredClone(DEFAULT_STATE);
-    }
+function next() {
+  stepIndex = Math.min(stepIndex + 1, steps.length - 1);
+  persist();
+  render();
+}
+function back() {
+  if(state._ui && state._ui.show_facture){ closeFacture(); return; }
+
+  stepIndex = Math.max(stepIndex - 1, 0);
+  persist();
+  render();
+}
+
+// ✅ Normalisation SIV FR : AA-123-AA
+function normalizeImmat(v) {
+  // Normalisation SIV FR : AA-123-AA
+  const raw = (v || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+
+  const siv = /^([A-Z]{2})([0-9]{3})([A-Z]{2})$/;
+  const m = raw.match(siv);
+  if (!m) return null;
+
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}
+
+function uid(prefix='f') {
+  return prefix + '_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+}
+
+async function persist() {
+  await saveState({ state, stepIndex });
+}
+
+async function restore() {
+  const saved = await loadState();
+  if(saved && saved.state) {
+    state = saved.state;
+    stepIndex = saved.stepIndex || 0;
   }
-  function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-  function resetState(){ state = structuredClone(DEFAULT_STATE); saveState(); render(); }
+}
 
-  function normalizeImmat(raw){
-    const up = (raw||'').toUpperCase().replace(/\s+/g,'').replace(/-/g,'');
-    const m = up.match(/^([A-Z]{2})(\d{3})([A-Z]{2})$/);
-    if(m) return `${m[1]}-${m[2]}-${m[3]}`;
-    return up;
-  }
+async function getFileBlob(fileId) {
+  return await idbGet('files', fileId);
+}
+async function setFileBlob(fileId, blob) {
+  await idbSet('files', fileId, blob);
+}
 
-  function euro(n){
-    const x = (Math.round((Number(n)||0)*100)/100).toFixed(2);
-    return x.replace('.',',') + ' €';
-  }
-  function num2(n){ return (Math.round((Number(n)||0)*100)/100).toFixed(2); }
+async function renderThumb(fileId) {
+  if(!fileId) return '';
+  const blob = await getFileBlob(fileId);
+  if(!blob) return '';
+  const url = URL.createObjectURL(blob);
+  return `<img class="thumb" src="${url}" alt="photo"/>`;
+}
 
-  function priceWithMargin(achatHT){
-    return Math.round((Number(achatHT)*(1+MARGE_PIECES))*100)/100;
-  }
+function cameraInputHtml(acceptMultiple=false) {
+  const multiple = acceptMultiple ? 'multiple' : '';
+  return `
+    <input id="cam" type="file" accept="image/*" ${multiple} capture="environment" />
+    <div class="small">Astuce : si la caméra ne s’ouvre pas, choisis “Appareil photo”.</div>
+  `;
+}
 
-  function showFatal(msg){
-    const root = document.getElementById('app');
-    if(!root) return;
-    root.innerHTML = `
-      <div class="container">
-        <h1>Facturation Atelier</h1>
-        <p class="sub">Erreur de chargement</p>
-        <div class="card">
-          <div class="pill no">Bloqué</div>
-          <p style="margin-top:10px"><b>${escapeHtml(msg)}</b></p>
-          <p class="small">Astuce : rafraîchir (⌘R) puis réessayer. Si ça persiste, envoyer une capture de la console.</p>
-        </div>
-      </div>`;
-  }
-  function escapeHtml(s){
-    return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-  }
+async function handleSinglePhoto(targetKey) {
+  const input = document.getElementById('cam');
+  if(!input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  const id = uid(targetKey);
+  await setFileBlob(id, file);
+  if(targetKey === 'points100') state.controles.photo_points100_id = id;
+  if(targetKey === 'a5') state.or_a5.photo_a5_id = id;
+  await persist();
+  render();
+}
 
-  async function ensureTesseract(){
-    if(window.Tesseract) return window.Tesseract;
-    await new Promise((resolve, reject)=>{
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-      script.onload = resolve;
-      script.onerror = ()=>reject(new Error('Impossible de charger Tesseract.js (réseau).'));
-      document.head.appendChild(script);
+async function handleMultiPhotoBL() {
+  const input = document.getElementById('cam');
+  if(!input.files || input.files.length === 0) return;
+  for (const file of input.files) {
+    const id = uid('bl');
+    await setFileBlob(id, file);
+    state.bl.photo_bl_ids.push(id);
+  }
+  await persist();
+  render();
+}
+
+async function shareToDriveSingle(label, fileId) {
+  if(!fileId) return alert('Aucune photo à partager.');
+  const blob = await getFileBlob(fileId);
+  if(!blob) return alert('Photo introuvable.');
+
+  const filename = `${state.vehicule.immat || 'vehicule'}_${label}.jpg`;
+  const file = new File([blob], filename, { type: blob.type || 'image/jpeg' });
+
+  if(navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+    await navigator.share({
+      title: 'Envoyer sur Google Drive',
+      text: 'Choisir Google Drive dans la liste.',
+      files: [file]
     });
-    return window.Tesseract;
+  } else {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    alert("Partage direct non disponible ici. Le fichier a été téléchargé : vous pouvez ensuite l'envoyer dans Google Drive.");
   }
-  async function runOCRFromFile(file){
-    const T = await ensureTesseract();
-    const { data } = await T.recognize(file, 'fra');
-    return (data && data.text) ? data.text : '';
+}
+
+async function shareToDriveBLAll() {
+  const ids = state.bl.photo_bl_ids || [];
+  if(ids.length === 0) return alert('Aucune photo BL à partager.');
+
+  const files = [];
+  for (let i=0; i<ids.length; i++) {
+    const blob = await getFileBlob(ids[i]);
+    if(!blob) continue;
+    const filename = `${state.vehicule.immat || 'vehicule'}_BL_${String(i+1).padStart(2,'0')}.jpg`;
+    files.push(new File([blob], filename, { type: blob.type || 'image/jpeg' }));
   }
 
-  let state = loadState();
-
-  function goto(n){
-    state.etape = n;
-    saveState();
-    render();
-    window.scrollTo({top:0, behavior:'smooth'});
-  }
-  function next(){ if(state.etape < 14) goto(state.etape + 1); }
-  function prev(){ if(state.etape > 1) goto(state.etape - 1); }
-
-  function vehicleOK(){
-    const v = state.vehicule;
-    return !!(v.immat && v.km && v.marque && v.modele && v.mecano);
-  }
-  function recapBadges(){
-    return { vehicule: vehicleOK(), c100: state.controle100.fait, a5: !!state.a5.photo, blReq: true, blPhotos: state.bl.photos.length };
-  }
-
-  function render(){
-    const root = document.getElementById('app');
-    if(!root) return;
-    const et = state.etape;
-    root.innerHTML = `
-      <div class="container">
-        <h1>Facturation Atelier</h1>
-        <p class="sub">Étape ${et}/14</p>
-        ${renderStep(et)}
-      </div>
-      <div class="footerbar">
-        <div class="inner">
-          <button class="btn secondary" id="btnResume">Reprendre dossier</button>
-          <button class="btn danger" id="btnNew">Nouveau dossier</button>
-        </div>
-      </div>
-    `;
-    document.getElementById('btnNew').addEventListener('click', resetState);
-    document.getElementById('btnResume').addEventListener('click', ()=>goto(state.etape || 1));
-    hookStep(et);
-  }
-
-  function renderStep(et){
-    switch(et){
-      case 1: return stepImmat();
-      case 2: return stepKm();
-      case 3: return stepMarque();
-      case 4: return stepModele();
-      case 5: return stepMecano();
-      case 6: return stepControle100();
-      case 7: return stepControlePhoto();
-      case 8: return stepA5Photo();
-      case 9: return stepA5Travaux();
-      case 10:return stepAutres();
-      case 11:return stepBLPhoto();
-      case 12:return stepBLTexte();
-      case 13:return stepGenerer();
-      case 14:return stepRecap();
-      default: return stepRecap();
-    }
-  }
-
-  function navButtons(nextLabel='Suivant', prevLabel='Retour', canNext=true){
-    return `
-      <div class="btnbar">
-        <button class="btn secondary" id="btnPrev">${prevLabel}</button>
-        <button class="btn" id="btnNext" ${canNext?'':'disabled style="opacity:.5;cursor:not-allowed"'}>${nextLabel}</button>
-      </div>`;
-  }
-
-  function stepImmat(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Immatriculation</h2>
-        <div class="small">Format final automatique : AA-123-AA. Tu valides ensuite.</div>
-        <label>Immat (saisie libre)</label>
-        <input id="immat" placeholder="ex: ev957na ou EV-957-NA" value="${escapeHtml(state.vehicule.immat_raw || '')}" />
-        <label>Immat proposée</label>
-        <input id="immatFmt" disabled value="${escapeHtml(state.vehicule.immat || '')}" />
-        ${navButtons('Valider', 'Retour', true)}
-      </div>`;
-  }
-  function stepKm(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Kilométrage</h2>
-        <label>Km</label>
-        <input id="km" inputmode="numeric" placeholder="ex: 139634" value="${escapeHtml(state.vehicule.km || '')}" />
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepMarque(){
-    const opts = marques.map(m=>`<option ${state.vehicule.marque===m?'selected':''} value="${m}">${m}</option>`).join('');
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Marque</h2>
-        <label>Choisir la marque</label>
-        <select id="marque">${opts}</select>
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.marque)}
-      </div>`;
-  }
-  function stepModele(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Modèle</h2>
-        <label>Modèle</label>
-        <input id="modele" placeholder="ex: Classe A / Série 1 / 308…" value="${escapeHtml(state.vehicule.modele || '')}" />
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.modele)}
-      </div>`;
-  }
-  function stepMecano(){
-    const cur = state.vehicule.mecano || 'SYLVAIN';
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Mécano</h2>
-        <div class="row">
-          <button class="btn dark" id="mSyl" style="flex:1">${cur==='SYLVAIN'?'✅ ':''}SYLVAIN</button>
-          <button class="btn secondary" id="mAutre" style="flex:1">${cur!=='SYLVAIN'?'✅ ':''}AUTRE</button>
-        </div>
-        <div id="autreWrap" class="${cur==='SYLVAIN'?'hidden':''}">
-          <label>Prénom (autre)</label>
-          <input id="mecanoAutre" value="${escapeHtml(cur==='SYLVAIN'?'':cur)}" placeholder="ex: THELMA" />
-        </div>
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.mecano)}
-      </div>`;
-  }
-  function stepControle100(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">100 points de contrôle</h2>
-        <div class="photo">
-          <div>
-            <div><b>Contrôle 100 points effectué</b></div>
-            <div class="small">À facturer : 0,50 h au taux horaire (${num2(TAUX_HORAIRE)} €/h).</div>
-          </div>
-          <label style="display:flex;align-items:center;gap:10px;margin:0">
-            <input type="checkbox" id="c100" ${state.controle100.fait?'checked':''} />
-            Oui
-          </label>
-        </div>
-        ${navButtons('Suivant', 'Retour', state.controle100.fait)}
-      </div>`;
-  }
-  function stepControlePhoto(){
-    const has = !!state.controle100.photo;
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Photo fiche 100 points (archive)</h2>
-        <div class="small">Optionnel pour l’instant, mais recommandé.</div>
-        <div class="btnbar">
-          <label class="btn dark" style="flex:1;text-align:center">
-            📷 Ajouter photo
-            <input class="hidden" id="photoC100" type="file" accept="image/*" capture="environment">
-          </label>
-          <button class="btn secondary" id="btnClearC100" style="flex:1" ${has?'':'disabled style="opacity:.5"'}>Supprimer</button>
-        </div>
-        <div class="small" style="margin-top:10px">${has?'✅ Photo ajoutée':'Aucune photo'}</div>
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepA5Photo(){
-    const has = !!state.a5.photo;
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Photo OR A5</h2>
-        <div class="btnbar">
-          <label class="btn dark" style="flex:1;text-align:center">
-            📷 Ajouter photo A5
-            <input class="hidden" id="photoA5" type="file" accept="image/*" capture="environment">
-          </label>
-          <button class="btn secondary" id="btnClearA5" style="flex:1" ${has?'':'disabled style="opacity:.5"'}>Supprimer</button>
-        </div>
-
-        <div style="margin-top:12px" class="photo">
-          <div>
-            <div><b>OCR (optionnel)</b></div>
-            <div class="small">Ne bloque jamais l’app. Nécessite Internet.</div>
-          </div>
-          <label class="btn dark" style="margin:0;flex:1;text-align:center">
-            🔎 OCR sur A5
-            <input class="hidden" id="ocrA5File" type="file" accept="image/*">
-          </label>
-        </div>
-
-        <div class="small" style="margin-top:10px">${has?'✅ Photo A5 ajoutée':'Aucune photo A5'}</div>
-        ${navButtons('Suivant', 'Retour', has)}
-      </div>`;
-  }
-  function stepA5Travaux(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Travaux / éléments montés</h2>
-        <div class="small">Saisir/corriger. L’OCR peut remplir ce champ.</div>
-        <label>Travaux</label>
-        <textarea id="a5txt" placeholder="Ex:\nTriangle suspension G 1h\nTriangle suspension D 1h\nPlaquettes AR\nBalais AV/AR">${escapeHtml(state.a5.texte||'')}</textarea>
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepAutres(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Autre intervention (optionnel)</h2>
-        <div class="small">Ex: démontage accessoires, faisceau, permutation pneus, etc.</div>
-        <textarea id="autres" placeholder="Décris ici si besoin…">${escapeHtml(state.divers.autres_interventions||'')}</textarea>
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepBLPhoto(){
-    const c = state.bl.photos.length;
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Photos BL / factures pièces</h2>
-        <div class="small">Tu peux ajouter plusieurs pages. (BL = pièces achetées)</div>
-
-        <div class="btnbar">
-          <label class="btn dark" style="flex:1;text-align:center">
-            📷 Ajouter BL (page)
-            <input class="hidden" id="photoBL" type="file" accept="image/*" capture="environment" multiple>
-          </label>
-          <button class="btn secondary" id="btnClearBL" style="flex:1" ${c?'' :'disabled style="opacity:.5"'}>Tout supprimer</button>
-        </div>
-
-        <div style="margin-top:12px" class="photo">
-          <div>
-            <div><b>OCR (optionnel)</b></div>
-            <div class="small">OCR sur la 1ère page BL, puis coller/corriger dans “Lignes BL”.</div>
-          </div>
-          <label class="btn dark" style="margin:0;flex:1;text-align:center">
-            🔎 OCR sur BL
-            <input class="hidden" id="ocrBLFile" type="file" accept="image/*">
-          </label>
-        </div>
-
-        <div class="small" style="margin-top:10px">Pages ajoutées : <b>${c}</b></div>
-        ${navButtons('Suivant', 'Retour', c>0)}
-      </div>`;
-  }
-  function stepBLTexte(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Lignes BL (saisie rapide)</h2>
-        <div class="small">1 ligne = 1 pièce facturable : “Désignation — MontantHT”. On prend le montant après remise.</div>
-        <label>Lignes</label>
-        <textarea id="bllignes" placeholder="Ex:\nPlaquettes AR — 28,58\nDisques AR — 70,08\nBalais AV — 13,20">${escapeHtml(state.bl.lignes||'')}</textarea>
-        ${navButtons('Générer facture', 'Retour', true)}
-      </div>`;
-  }
-
-  function parseBLLines(text){
-    const lines = (text||'').split('\n').map(l=>l.trim()).filter(Boolean);
-    const out = [];
-    for(const l of lines){
-      const m = l.match(/^(.*?)(?:—|-|:)\s*([0-9]+(?:[.,][0-9]{1,2})?)\s*$/);
-      if(!m) continue;
-      const des = m[1].trim();
-      const amt = parseFloat(m[2].replace(',','.'));
-      if(!des || isNaN(amt)) continue;
-      out.push({designation: des, achat_ht: Math.round(amt*100)/100});
-    }
-    return out;
-  }
-
-  function buildFacture(){
-    const lignes = [];
-    if(state.controle100.fait){
-      lignes.push({ type:'MO', designation:'Contrôle 100 points', qte: 0.50, pu_ht: TAUX_HORAIRE, mt_ht: Math.round((0.50*TAUX_HORAIRE)*100)/100 });
-    }
-    const a5 = (state.a5.texte||'').toLowerCase();
-    if(a5.includes('triangle') && a5.includes('1h')){
-      const count = (a5.match(/triangle/g)||[]).length || 1;
-      for(let i=0;i<count;i++){
-        lignes.push({ type:'MO', designation:'Triangle suspension (barème)', qte: 1.00, pu_ht: TAUX_HORAIRE, mt_ht: Math.round((1.00*TAUX_HORAIRE)*100)/100 });
-      }
-    }
-    if(a5.includes('frein') && (a5.includes('plaquette') || a5.includes('plaquettes')) && a5.includes('avant')){
-      lignes.push({ type:'MO', designation:'Freins AV (disques + plaquettes) — barème', qte: 2.00, pu_ht: TAUX_HORAIRE, mt_ht: Math.round((2.00*TAUX_HORAIRE)*100)/100 });
-    }
-    const bl = parseBLLines(state.bl.lignes);
-    bl.forEach(p=>{
-      const vente = priceWithMargin(p.achat_ht);
-      lignes.push({ type:'PIECE', designation:p.designation, qte:1, pu_ht: vente, mt_ht: vente });
+  if(navigator.share && navigator.canShare && navigator.canShare({ files })) {
+    await navigator.share({
+      title: 'Envoyer sur Google Drive',
+      text: 'Choisir Google Drive dans la liste.',
+      files
     });
-    if(state.divers.autres_interventions && state.divers.autres_interventions.trim()){
-      lignes.push({ type:'NOTE', designation:`Autre intervention: ${state.divers.autres_interventions.trim()}`, qte:'', pu_ht:'', mt_ht:'' });
-    }
-    state.facture.lignes = lignes;
+  } else {
+    alert("Partage multi-fichiers non disponible ici. Astuce : partage page par page, ou utilise Android/Chrome. On améliorera ensuite.");
   }
+}
 
-  function totals(){
-    const lignes = state.facture.lignes || [];
-    let ht=0;
-    for(const l of lignes){
-      const v = Number(l.mt_ht);
-      if(!isNaN(v)) ht += v;
-    }
-    ht = Math.round(ht*100)/100;
-    const tva = Math.round((ht*TVA)*100)/100;
-    const ttc = Math.round((ht+tva)*100)/100;
-    return {ht, tva, ttc};
-  }
+function badgeOk(cond) {
+  return cond ? '<span class="badge ok">OK</span>' : '<span class="badge warn">À faire</span>';
+}
 
-  function stepGenerer(){
-    try{ buildFacture(); saveState(); }catch(e){}
-    const t = totals();
-    const rows = (state.facture.lignes||[]).map(l=>{
-      const q = (l.qte===''||l.qte===null||l.qte===undefined) ? '' : (typeof l.qte==='number'? num2(l.qte) : l.qte);
-      const pu = (typeof l.pu_ht==='number') ? euro(l.pu_ht) : (l.pu_ht||'');
-      const mt = (typeof l.mt_ht==='number') ? euro(l.mt_ht) : (l.mt_ht||'');
-      return `<tr>
-        <td>${escapeHtml(l.designation||'')}</td>
-        <td style="text-align:right">${escapeHtml(String(q))}</td>
-        <td style="text-align:right">${escapeHtml(String(pu))}</td>
-        <td style="text-align:right"><b>${escapeHtml(String(mt))}</b></td>
-      </tr>`;
-    }).join('');
+function render() {
+  if(state._ui && state._ui.show_facture){ renderFacture(); return; }
 
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Générer facture (aperçu)</h2>
-        <div class="small">Règles : pièces = achat HT (après remise) +10% ; TVA 20% ; MO ${num2(TAUX_HORAIRE)} €/h.</div>
+  setProgress();
+  renderBottomBar();
+  const step = steps[stepIndex];
 
-        <div style="overflow:auto;margin-top:12px">
-          <table style="width:100%;border-collapse:collapse">
-            <thead>
-              <tr>
-                <th style="text-align:left;border-bottom:1px solid var(--border);padding:8px 6px">Désignation</th>
-                <th style="text-align:right;border-bottom:1px solid var(--border);padding:8px 6px">Qté/Temps</th>
-                <th style="text-align:right;border-bottom:1px solid var(--border);padding:8px 6px">PU HT</th>
-                <th style="text-align:right;border-bottom:1px solid var(--border);padding:8px 6px">Mt HT</th>
-              </tr>
-            </thead>
-            <tbody>${rows || '<tr><td colspan="4" class="small" style="padding:10px">Aucune ligne</td></tr>'}</tbody>
-          </table>
-        </div>
-
-        <hr/>
-        <div class="row">
-          <div class="col"><div class="small">Total HT</div><div style="font-size:22px;font-weight:900">${euro(t.ht)}</div></div>
-          <div class="col"><div class="small">TVA 20%</div><div style="font-size:22px;font-weight:900">${euro(t.tva)}</div></div>
-          <div class="col"><div class="small">Total TTC</div><div style="font-size:22px;font-weight:900">${euro(t.ttc)}</div></div>
-        </div>
-
-        <div class="btnbar" style="margin-top:16px">
-          <button class="btn secondary" id="btnEdit">Modifier lignes BL/A5</button>
-          <button class="btn" id="btnRecap">Continuer</button>
-        </div>
+  if(step === 'immat') {
+    renderCard(`
+      <h2>Immatriculation (obligatoire)</h2>
+      <label>Immat</label>
+      <input id="immat" placeholder="AB123CD ou AB-123-CD" value="${state.vehicule.immat_raw || state.vehicule.immat}"/>
+      <div class="small">Format final : <b>AB-123-CD</b></div>
+      <div class="actions">
+        <button class="secondary" onclick="resetAll()">Nouveau dossier</button>
+        <button onclick="saveImmat()">Suivant</button>
       </div>
-    `;
+    `);
   }
 
-  function stepRecap(){
-    const r = recapBadges();
-    const j = escapeHtml(JSON.stringify({
-      immat: state.vehicule.immat,
-      immat_raw: state.vehicule.immat_raw,
-      km: state.vehicule.km,
-      marque: state.vehicule.marque,
-      modele: state.vehicule.modele,
-      mecano: state.vehicule.mecano,
-      bl_photos: state.bl.photos.length
-    }, null, 2));
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Récap</h2>
-        <div class="row" style="gap:8px;margin-bottom:12px">
-          <span>Véhicule :</span> <span class="pill ${r.vehicule?'ok':'no'}">${r.vehicule?'OK':'MANQUANT'}</span>
-          <span>100 points :</span> <span class="pill ${r.c100?'ok':'no'}">${r.c100?'OK':'NON'}</span>
-          <span>A5 :</span> <span class="pill ${r.a5?'ok':'no'}">${r.a5?'OK':'NON'}</span>
-          <span>BL photos :</span> <span class="pill ${r.blPhotos>0?'ok':'no'}">${r.blPhotos}</span>
-        </div>
-
-        <pre style="white-space:pre-wrap;background:#0b0b0f;color:#e5e7eb;padding:12px;border-radius:12px;overflow:auto">${j}</pre>
-
-        <div class="btnbar">
-          <button class="btn secondary" id="btnBackGen">Retour</button>
-          <button class="btn dark" id="btnNew2">Nouveau dossier</button>
-        </div>
-      </div>`;
+  else if(step === 'immat_confirm') {
+    renderCard(`
+      <h2>Validation immatriculation</h2>
+      <div class="small">Format final :</div>
+      <div style="font-size:28px;font-weight:900;letter-spacing:1px;margin:10px 0">${state.vehicule.immat || '—'}</div>
+      <div class="small">Si c’est incorrect, clique sur “Modifier”.</div>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Modifier</button>
+        <button onclick="next()">Valider</button>
+      </div>
+    `);
   }
 
-  function hookStep(et){
-    const prevBtn = document.getElementById('btnPrev');
-    const nextBtn = document.getElementById('btnNext');
-    if(prevBtn) prevBtn.addEventListener('click', prev);
-
-    if(nextBtn) nextBtn.addEventListener('click', async ()=>{
-      if(et===1){
-        const raw = document.getElementById('immat').value.trim();
-        const fmt = normalizeImmat(raw);
-        state.vehicule.immat_raw = raw;
-        state.vehicule.immat = fmt;
-        saveState();
-        document.getElementById('immatFmt').value = fmt;
-        if(!fmt || fmt.length<5){ alert("Immatriculation invalide. Saisis au moins AA123AA."); return; }
-        if(!confirm("Valider l'immatriculation : " + fmt + " ?")) return;
-        next(); return;
-      }
-      if(et===2){
-        const km = document.getElementById('km').value.replace(/\s+/g,'').trim();
-        state.vehicule.km = km; saveState();
-        if(!km){ alert("Kilométrage obligatoire."); return; }
-        next(); return;
-      }
-      if(et===3){
-        state.vehicule.marque = document.getElementById('marque').value; saveState();
-        if(!state.vehicule.marque){ alert("Marque obligatoire."); return; }
-        next(); return;
-      }
-      if(et===4){
-        state.vehicule.modele = document.getElementById('modele').value.trim(); saveState();
-        if(!state.vehicule.modele){ alert("Modèle obligatoire."); return; }
-        next(); return;
-      }
-      if(et===5){
-        if(state.vehicule.mecano && state.vehicule.mecano.trim()){ next(); return; }
-        alert("Prénom mécano obligatoire."); return;
-      }
-      if(et===6){
-        state.controle100.fait = document.getElementById('c100').checked; saveState();
-        if(!state.controle100.fait){ alert("Tu dois cocher '100 points effectué'."); return; }
-        next(); return;
-      }
-      if(et===8){
-        if(!state.a5.photo){ alert("Photo A5 obligatoire."); return; }
-        next(); return;
-      }
-      if(et===9){
-        state.a5.texte = document.getElementById('a5txt').value; saveState(); next(); return;
-      }
-      if(et===10){
-        state.divers.autres_interventions = document.getElementById('autres').value; saveState(); next(); return;
-      }
-      if(et===11){
-        if(state.bl.photos.length<1){ alert("Au moins 1 photo BL obligatoire."); return; }
-        next(); return;
-      }
-      if(et===12){
-        state.bl.lignes = document.getElementById('bllignes').value; saveState(); next(); return;
-      }
-      if(et===13){ goto(14); return; }
-      next();
-    });
-
-    if(et===1){
-      const immat = document.getElementById('immat');
-      const fmt = document.getElementById('immatFmt');
-      immat.addEventListener('input', ()=>{
-        const raw = immat.value.trim();
-        const out = normalizeImmat(raw);
-        state.vehicule.immat_raw = raw;
-        state.vehicule.immat = out;
-        fmt.value = out;
-        saveState();
-      });
-    }
-
-    if(et===5){
-      const mSyl = document.getElementById('mSyl');
-      const mAutre = document.getElementById('mAutre');
-      const inpt = document.getElementById('mecanoAutre');
-      mSyl.addEventListener('click', ()=>{ state.vehicule.mecano='SYLVAIN'; saveState(); render(); });
-      mAutre.addEventListener('click', ()=>{ state.vehicule.mecano=(inpt&&inpt.value.trim())?inpt.value.trim().toUpperCase():'AUTRE'; saveState(); render(); });
-      if(inpt){
-        inpt.addEventListener('input', ()=>{ const v=inpt.value.trim().toUpperCase(); state.vehicule.mecano=v||'AUTRE'; saveState(); });
-      }
-    }
-
-    if(et===6){
-      const c100 = document.getElementById('c100');
-      c100.addEventListener('change', ()=>{ state.controle100.fait=c100.checked; saveState(); render(); });
-    }
-
-    if(et===7){
-      const inp = document.getElementById('photoC100');
-      const clear = document.getElementById('btnClearC100');
-      inp.addEventListener('change', async ()=>{
-        const f = inp.files && inp.files[0];
-        if(!f) return;
-        state.controle100.photo = await fileToDataUrl(f);
-        saveState(); render();
-      });
-      if(clear) clear.addEventListener('click', ()=>{ state.controle100.photo=null; saveState(); render(); });
-    }
-
-    if(et===8){
-      const inp = document.getElementById('photoA5');
-      const clear = document.getElementById('btnClearA5');
-      const ocrFile = document.getElementById('ocrA5File');
-      inp.addEventListener('change', async ()=>{
-        const f = inp.files && inp.files[0];
-        if(!f) return;
-        state.a5.photo = await fileToDataUrl(f);
-        saveState(); render();
-      });
-      if(clear) clear.addEventListener('click', ()=>{ state.a5.photo=null; saveState(); render(); });
-      ocrFile.addEventListener('change', async ()=>{
-        const f = ocrFile.files && ocrFile.files[0];
-        if(!f) return;
-        try{
-          toast("OCR en cours…");
-          const txt = await runOCRFromFile(f);
-          state.a5.texte = (state.a5.texte ? (state.a5.texte+"\n") : "") + txt.trim();
-          saveState();
-          alert("OCR terminé. Texte ajouté dans 'Travaux'.");
-        }catch(e){
-          alert("OCR impossible: " + (e && e.message ? e.message : e));
-        }finally{
-          ocrFile.value='';
-        }
-      });
-    }
-
-    if(et===11){
-      const inp = document.getElementById('photoBL');
-      const clear = document.getElementById('btnClearBL');
-      const ocrFile = document.getElementById('ocrBLFile');
-      inp.addEventListener('change', async ()=>{
-        const files = Array.from(inp.files || []);
-        if(!files.length) return;
-        for(const f of files){ state.bl.photos.push(await fileToDataUrl(f)); }
-        saveState(); render();
-      });
-      if(clear) clear.addEventListener('click', ()=>{ state.bl.photos=[]; saveState(); render(); });
-      ocrFile.addEventListener('change', async ()=>{
-        const f = ocrFile.files && ocrFile.files[0];
-        if(!f) return;
-        try{
-          toast("OCR en cours…");
-          const txt = await runOCRFromFile(f);
-          state.bl.lignes = (state.bl.lignes ? (state.bl.lignes+"\n") : "") + txt.trim();
-          saveState();
-          alert("OCR terminé. Vérifie/corrige dans 'Lignes BL'.");
-        }catch(e){
-          alert("OCR impossible: " + (e && e.message ? e.message : e));
-        }finally{
-          ocrFile.value='';
-        }
-      });
-    }
-
-    if(et===13){
-      const edit = document.getElementById('btnEdit');
-      const recap = document.getElementById('btnRecap');
-      if(edit) edit.addEventListener('click', ()=>goto(9));
-      if(recap) recap.addEventListener('click', ()=>goto(14));
-    }
-
-    if(et===14){
-      const back = document.getElementById('btnBackGen');
-      const n2 = document.getElementById('btnNew2');
-      if(back) back.addEventListener('click', ()=>goto(13));
-      if(n2) n2.addEventListener('click', resetState);
-    }
+  else if(step === 'km') {
+    renderCard(`
+      <h2>Kilométrage (obligatoire)</h2>
+      <label>KM</label>
+      <input id="km" type="number" placeholder="128450" value="${state.vehicule.km}"/>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="saveKm()">Suivant</button>
+      </div>
+    `);
   }
+  else if(step === 'marque') {
+    const brandOptions = Object.keys(BRAND_MODELS).map(b => `<option value="${b}">${b}</option>`).join('');
+    renderCard(`
+      <h2>Marque (obligatoire)</h2>
+      <label>Choisir la marque</label>
+      <select id="marque" onchange="onBrandChange()">
+        <option value="">— Sélectionner —</option>
+        ${brandOptions}
+      </select>
+      <div id="marqueAutreWrap" style="display:none;margin-top:10px">
+        <label>Marque (autre)</label>
+        <input id="marqueAutre" placeholder="Ex: DACIA, VOLVO..." />
+      </div>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="saveBrand()">Suivant</button>
+      </div>
+    `);
 
-  // Étape 3 — Marque : mise à jour immédiate pour activer "Suivant"
-  if(et===3){
     const sel = document.getElementById('marque');
-    if(sel){
-      sel.addEventListener('change', ()=>{
-        state.vehicule.marque = sel.value || '';
-        // Si la marque change, on réinitialise le modèle
-        state.vehicule.modele = '';
-        saveState();
-        render();
-      });
+    sel.value = (state.vehicule.marque && BRAND_MODELS[state.vehicule.marque] !== undefined) ? state.vehicule.marque : (state.vehicule.marque ? 'AUTRE' : '');
+    if(sel.value === 'AUTRE') {
+      document.getElementById('marqueAutreWrap').style.display='block';
+      document.getElementById('marqueAutre').value = state.vehicule.marque;
     }
   }
+  else if(step === 'modele') {
+    const brand = (state.vehicule.marque||'').toUpperCase();
+    const models = BRAND_MODELS[brand] || [];
+    const modelOptions = models.map(m => `<option value="${m}">${m}</option>`).join('');
+    const useDropdown = models.length > 0 && brand !== 'AUTRE';
 
-  // Étape 4 — Modèle : mise à jour immédiate pour activer "Suivant"
-  if(et===4){
-    const sel = document.getElementById('modele');
-    if(sel){
-      sel.addEventListener('change', ()=>{
-        state.vehicule.modele = sel.value || '';
-        saveState();
-        render();
-      });
-    }
+    renderCard(`
+      <h2>Modèle (obligatoire)</h2>
+      <div class="small">Marque : <b>${state.vehicule.marque || '—'}</b></div>
+      ${useDropdown ? `
+        <label>Choisir le modèle</label>
+        <select id="modele">
+          <option value="">— Sélectionner —</option>
+          ${modelOptions}
+        </select>
+      ` : `
+        <label>Modèle</label>
+        <input id="modeleTxt" placeholder="Ex: Classe A, Duster..." value="${state.vehicule.modele}"/>
+      `}
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="saveModel(${useDropdown})">Suivant</button>
+      </div>
+    `);
+
+    if(useDropdown) document.getElementById('modele').value = state.vehicule.modele || '';
   }
-
-  function toast(msg){
-    try{
-      const t = document.createElement('div');
-      t.textContent = msg;
-      t.style.position='fixed';
-      t.style.left='50%';
-      t.style.bottom='88px';
-      t.style.transform='translateX(-50%)';
-      t.style.background='#111827';
-      t.style.color='#fff';
-      t.style.padding='10px 12px';
-      t.style.borderRadius='999px';
-      t.style.fontWeight='800';
-      t.style.zIndex='99999';
-      document.body.appendChild(t);
-      setTimeout(()=>t.remove(), 1800);
-    }catch{}
+  else if(step === 'mecano') {
+    renderCard(`
+      <h2>Mécano (obligatoire)</h2>
+      <button onclick="setMecano('SYLVAIN')">SYLVAIN</button>
+      <button class="secondary" onclick="askOtherMecano()">AUTRE</button>
+      <div class="small">Actuel : <b>${state.vehicule.mecano || '—'}</b></div>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="validateMecano()">Suivant</button>
+      </div>
+    `);
   }
-
-  async function fileToDataUrl(file){
-    return await new Promise((resolve, reject)=>{
-      const r = new FileReader();
-      r.onload = ()=>resolve(r.result);
-      r.onerror = ()=>reject(new Error('Lecture photo impossible'));
-      r.readAsDataURL(file);
-    });
+  else if(step === 'points100') {
+    renderCard(`
+      <h2>100 points de contrôle</h2>
+      <div class="small">Obligatoire : bouton + photo.</div>
+      <div class="small">Statut : ${badgeOk(state.controles.points100_done)}</div>
+      <button onclick="mark100()">✅ 100 points effectués (0,50 h)</button>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="goIf100()">Suivant</button>
+      </div>
+    `);
   }
+  else if(step === 'photo_points100') {
+    const ok = !!state.controles.photo_points100_id;
+    renderCard(`
+      <h2>Photo fiche 100 points (obligatoire)</h2>
+      <div class="small">Statut : ${badgeOk(ok)}</div>
+      <label>Prendre la photo</label>
+      ${cameraInputHtml(false)}
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="validatePhoto100()">Suivant</button>
+      </div>
+      <hr>
+      <button class="secondary" onclick="shareToDriveSingle('100points', state.controles.photo_points100_id)">📤 Envoyer sur Google Drive</button>
+      <div id="thumbWrap"></div>
+    `);
+    document.getElementById('cam').onchange = () => handleSinglePhoto('points100');
+    (async()=>{
+      document.getElementById('thumbWrap').innerHTML = await renderThumb(state.controles.photo_points100_id);
+    })();
+  }
+  else if(step === 'photo_a5') {
+    const ok = !!state.or_a5.photo_a5_id;
+    renderCard(`
+      <h2>Photo fiche A5 (obligatoire)</h2>
+      <div class="small">Statut : ${badgeOk(ok)}</div>
+      <label>Prendre la photo</label>
+      ${cameraInputHtml(false)}
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="validatePhotoA5()">Suivant</button>
+      </div>
+      <hr>
+      <button class="secondary" onclick="shareToDriveSingle('A5', state.or_a5.photo_a5_id)">📤 Envoyer sur Google Drive</button>
+      <div id="thumbWrap"></div>
+    `);
+    document.getElementById('cam').onchange = () => handleSinglePhoto('a5');
+    (async()=>{
+      document.getElementById('thumbWrap').innerHTML = await renderThumb(state.or_a5.photo_a5_id);
+    })();
+  }
+  else if(step === 'ocr_a5') {
+    renderCard(`
+      <h2>Travaux (saisie rapide)</h2>
+      <div id="ocrProgress" class="small"></div>
+      <button class="secondary no-print" onclick="doOcrA5()">🔍 Lancer OCR sur la photo A5</button>
+      <div class="small">Astuce : photo bien à plat, bien cadrée, bonne lumière.</div>
 
-  window.addEventListener('load', function(){
-    try{
-      if(!state || !state.version) state = loadState();
-      if(!state.etape) state.etape = 1;
-      saveState();
-      render();
-    }catch(e){
-      showFatal(e && e.message ? e.message : String(e));
-    }
-  });
+      <div class="small">OCR sera branché ensuite. Pour l’instant : saisir/corriger.</div>
+      <label>Travaux / éléments montés</label>
+      <textarea id="a5txt" placeholder="Ex: Triangle suspension G 1h\nTriangle suspension D 1h">${state.or_a5.ocr_text || ''}</textarea>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="saveA5Text()">Suivant</button>
+      </div>
+    `);
+
+async function doOcrA5(){
+  try{
+    const id = state.or_a5.photo_a5_id;
+    if(!id) return alert('Aucune photo A5.');
+    const txt = await runOcrOnFileId(id,'fra');
+    const cleaned = cleanOcrText(txt);
+    const ta = document.getElementById('a5txt');
+    if(ta) ta.value = cleaned;
+    state.or_a5.ocr_text = cleaned;
+    await persist();
+    alert('OCR A5 terminé. Vérifie et corrige si besoin.');
+  } catch(e){
+    alert('OCR A5: ' + (e.message||e));
+  }
+}
+
+
+  }
+  else if(step === 'pieces_question') {
+    renderCard(`
+      <h2>Pièces achetées ?</h2>
+      <div class="small">Si NON : pas de BL requis.</div>
+      <div class="row">
+        <button onclick="setPieces(true)">Oui</button>
+        <button class="secondary" onclick="setPieces(false)">Non</button>
+      </div>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+      </div>
+    `);
+  }
+  else if(step === 'photo_bl') {
+    const count = (state.bl.photo_bl_ids||[]).length;
+    renderCard(`
+      <h2>Photo BL fournisseur (obligatoire si pièces)</h2>
+      <div class="small">Photos : <b>${count}</b></div>
+      <label>Prendre 1 ou plusieurs pages</label>
+      ${cameraInputHtml(true)}
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="validatePhotoBL()">Suivant</button>
+      </div>
+      <hr>
+      <button class="secondary" onclick="shareToDriveBLAll()">📤 Envoyer les BL sur Google Drive</button>
+      <div id="thumbWrap"></div>
+    `);
+    document.getElementById('cam').onchange = () => handleMultiPhotoBL();
+    (async()=>{
+      const ids = state.bl.photo_bl_ids||[];
+      if(ids.length>0) {
+        document.getElementById('thumbWrap').innerHTML = await renderThumb(ids[0]) + (ids.length>1 ? `<div class="small">+ ${ids.length-1} autre(s) page(s)</div>` : '');
+      }
+    })();
+  }
+  else if(step === 'ocr_bl') {
+    renderCard(`
+      <h2>BL (saisie rapide)</h2>
+      <div id="ocrProgress" class="small"></div>
+      <button class="secondary no-print" onclick="doOcrBL()">🔍 Lancer OCR sur BL (page 1)</button>
+      <div class="small">Ensuite : ouvre “Générer facture” pour vérifier les pièces.</div>
+
+      <div class="small">OCR sera branché ensuite. Pour l’instant : saisir/colle les lignes.</div>
+      <label>Lignes BL</label>
+      <textarea id="bltxt" placeholder="Ex: Plaquettes AR — 28,58 €">${state.bl.ocr_text || ''}</textarea>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button onclick="saveBLText()">Suivant</button>
+      </div>
+    `);
+
+async function doOcrBL(){
+  try{
+    const ids = state.bl.photo_bl_ids || [];
+    if(ids.length===0) return alert('Aucune photo BL.');
+    const txt = await runOcrOnFileId(ids[0],'fra');
+    const cleaned = cleanOcrText(txt);
+    const parsed = parseBLTextToPieces(cleaned);
+
+    const ta = document.getElementById('bltxt');
+    if(ta) ta.value = parsed.linesText || cleaned;
+
+    state.bl.ocr_text = parsed.linesText || cleaned;
+
+    state.facture.lignes_pieces = (parsed.pieces || []).map(p => ({
+      desc: p.desc,
+      qty: p.qty,
+      achat_ht: round2(p.achat_ht),
+      marge: 10
+    }));
+
+    await persist();
+    alert('OCR BL terminé. Vérifie les lignes sur la facture.');
+  } catch(e){
+    alert('OCR BL: ' + (e.message||e));
+  }
+}
+
+
+  }
+  else if(step === 'recap') {
+    renderCard(`
+      <h2>Récap</h2>
+      <div class="small">Véhicule : ${badgeOk(!!state.vehicule.modele && !!state.vehicule.mecano)}</div>
+      <div class="small">100 points : ${badgeOk(!!state.controles.photo_points100_id)}</div>
+      <div class="small">A5 : ${badgeOk(!!state.or_a5.photo_a5_id)}</div>
+      <div class="small">BL requis : <b>${state.bl.required ? 'OUI' : 'NON'}</b></div>
+      <div class="small">BL photos : <b>${(state.bl.photo_bl_ids||[]).length}</b></div>
+      <hr>
+      <pre>${JSON.stringify(state.vehicule, null, 2)}</pre>
+      <div class="actions">
+        <button class="ghost" onclick="back()">Retour</button>
+        <button class="secondary" onclick="resetAll()">Nouveau dossier</button>
+      </div>
+    `);
+  }
+}
+
+function saveImmat() {
+  const v = normalizeImmat(document.getElementById('immat').value);
+  if(!v) return showError('Immatriculation invalide. Format attendu : AB-123-CD');
+  state.vehicule.immat = v;
+  next();
+}
+function saveKm() {
+  const v = (document.getElementById('km').value || '').trim();
+  if(!v) return showError('Kilométrage obligatoire.');
+  state.vehicule.km = v;
+  next();
+}
+function onBrandChange() {
+  const sel = document.getElementById('marque');
+  document.getElementById('marqueAutreWrap').style.display = (sel.value === 'AUTRE') ? 'block' : 'none';
+}
+function saveBrand() {
+  const sel = (document.getElementById('marque').value || '').trim();
+  if(!sel) return showError('Marque obligatoire.');
+  if(sel === 'AUTRE') {
+    const other = (document.getElementById('marqueAutre').value || '').trim();
+    if(!other) return showError('Merci d’indiquer la marque (autre).');
+    state.vehicule.marque = other.toUpperCase();
+  } else {
+    state.vehicule.marque = sel;
+  }
+  state.vehicule.modele = '';
+  next();
+}
+function saveModel(useDropdown) {
+  let v = '';
+  if(useDropdown) v = (document.getElementById('modele').value || '').trim();
+  else v = (document.getElementById('modeleTxt').value || '').trim();
+  if(!v) return showError('Modèle obligatoire.');
+  state.vehicule.modele = v;
+  next();
+}
+function setMecano(name) { state.vehicule.mecano = name; persist(); render(); }
+function askOtherMecano() {
+  const n = prompt('Prénom du mécano ?');
+  if(n) state.vehicule.mecano = n.trim().toUpperCase();
+  persist(); render();
+}
+function validateMecano() {
+  if(!state.vehicule.mecano) return showError('Mécano obligatoire.');
+  next();
+}
+function mark100() { state.controles.points100_done = true; persist(); render(); }
+function goIf100() {
+  if(!state.controles.points100_done) return showError('Merci de valider “100 points effectués”.');
+  next();
+}
+function validatePhoto100() {
+  if(!state.controles.photo_points100_id) return showError('Photo 100 points obligatoire.');
+  next();
+}
+function validatePhotoA5() {
+  if(!state.or_a5.photo_a5_id) return showError('Photo A5 obligatoire.');
+  next();
+}
+function saveA5Text() {
+  state.or_a5.ocr_text = (document.getElementById('a5txt').value || '');
+  next();
+}
+function setPieces(val) {
+  state.bl.required = val;
+  if(val) stepIndex = steps.indexOf('photo_bl');
+  else stepIndex = steps.indexOf('recap');
+  persist(); render();
+}
+function validatePhotoBL() {
+  if(state.bl.required && (!state.bl.photo_bl_ids || state.bl.photo_bl_ids.length===0)) {
+    return showError('Photo BL obligatoire si pièces achetées = OUI.');
+  }
+  next();
+}
+function saveBLText() {
+  state.bl.ocr_text = (document.getElementById('bltxt').value || '');
+  next();
+}
+
+async function resetAll() {
+  state = JSON.parse(JSON.stringify(DEFAULT_STATE));
+  stepIndex = 0;
+  await resetAllStorage();
+  await persist();
+  render();
+}
+
+(async function init() {
+  await restore();
+  await persist();
+  render();
 })();
+
+function renderBottomBar() {
+  const bar = document.getElementById('bottomBar');
+  if(!bar) return;
+  bar.innerHTML = `
+    <button class="ghost" onclick="resumeDraft()">🔁 Reprendre dossier</button>
+    <button class="danger" onclick="resetAll()">➕ Nouveau dossier</button>
+  `;
+}
+async function resumeDraft() {
+  await restore();
+  render();
+}
+
+
+function round2(n){return Math.round((Number(n)||0)*100)/100}
+function fmtEuro(n){return round2(n).toFixed(2).replace('.',',')}
+
+const BAREMES_MO = [
+  { key:'controle_100', label:'Contrôle 100 points', h:0.50 },
+  { key:'vidange_filtre', label:'Vidange + filtre huile', h:1.00 },
+  { key:'vidange_tous_filtres', label:'Vidange + tous filtres', h:2.00 },
+  { key:'plaquettes_av', label:'Plaquettes avant', h:1.00 },
+  { key:'plaquettes_ar', label:'Plaquettes arrière', h:1.00 },
+  { key:'disques_plaquettes_av', label:'Disques + plaquettes avant', h:2.00 },
+  { key:'disques_plaquettes_ar', label:'Disques + plaquettes arrière', h:2.00 },
+  { key:'triangle_susp', label:'Triangle de suspension (par côté)', h:1.00 },
+  { key:'balais', label:'Balais essuie-glace (avant+arrière)', h:0.15 }
+];
+function rebuildAutoMOLines(){
+  // rebuild MO lines from known flags; keep manual lines added by user
+  const taux = Number(state.facture.taux_mo)||60;
+  const lines = [];
+  // contrôle 100 points si photo/flag
+  if(state.docs && state.docs.ctrl100 && state.docs.ctrl100.length>0){
+    const b = BAREMES_MO.find(x=>x.key==='controle_100');
+    lines.push({label:b.label, h:b.h, pu:taux, total: round2(b.h*taux)});
+  }
+  state.facture.lignes_mo = lines;
+}
+
+function addPieceLine(){
+  state.facture.lignes_pieces.push({desc:'', qty:1, achat_ht:0, marge:10});
+  persistAndRender();
+}
+function removePieceLine(i){
+  state.facture.lignes_pieces.splice(i,1);
+  persistAndRender();
+}
+function updatePiece(i, field, val){
+  const l = state.facture.lignes_pieces[i];
+  if(!l) return;
+  l[field] = (field==='desc') ? val : Number(val);
+  persistAndRender();
+}
+function addMOLineFromBareme(){
+  const key = document.getElementById('baremeSel').value;
+  const qty = Number(document.getElementById('baremeQty').value||1);
+  const b = BAREMES_MO.find(x=>x.key===key);
+  if(!b) return;
+  const taux = Number(state.facture.taux_mo)||60;
+  state.facture.lignes_forfait.push({label:`${b.label} x${qty}`, h: round2(b.h*qty), pu:taux, total: round2(b.h*qty*taux)});
+  persistAndRender();
+}
+function removeForfait(i){
+  state.facture.lignes_forfait.splice(i,1);
+  persistAndRender();
+}
+function computeTotals(){
+  const mo = [...(state.facture.lignes_mo||[]), ...(state.facture.lignes_forfait||[])]
+    .reduce((s,l)=>s+round2(l.total||0),0);
+  const pieces = (state.facture.lignes_pieces||[]).reduce((s,l)=>{
+    const qty = Number(l.qty)||0;
+    const achat = Number(l.achat_ht)||0;
+    const vente = round2(achat*1.10); // +10%
+    return s + round2(qty*vente);
+  },0);
+  const ht = round2(mo+pieces);
+  const tva = round2(ht*(Number(state.facture.tva_tx||0)/100));
+  const ttc = round2(ht+tva);
+  return {mo,pieces,ht,tva,ttc};
+}
+function renderFacture(){
+  rebuildAutoMOLines();
+  const t = computeTotals();
+  const opts = BAREMES_MO.map(b=>`<option value="${b.key}">${b.label} (${b.h.toFixed(2)} h)</option>`).join('');
+  const piecesRows = (state.facture.lignes_pieces||[]).map((l,i)=>{
+    const achat = Number(l.achat_ht)||0;
+    const vente = round2(achat*1.10);
+    const qty = Number(l.qty)||0;
+    const total = round2(qty*vente);
+    return `
+      <tr>
+        <td><input value="${l.desc||''}" oninput="updatePiece(${i},'desc',this.value)" placeholder="Désignation"></td>
+        <td style="width:70px"><input type="number" value="${qty}" oninput="updatePiece(${i},'qty',this.value)"></td>
+        <td style="width:120px"><input type="number" value="${achat}" oninput="updatePiece(${i},'achat_ht',this.value)" step="0.01"></td>
+        <td style="width:120px">${fmtEuro(vente)}</td>
+        <td style="width:120px">${fmtEuro(total)}</td>
+        <td style="width:46px"><button class="ghost no-print" onclick="removePieceLine(${i})">✕</button></td>
+      </tr>
+    `;
+  }).join('');
+  const moRows = [...(state.facture.lignes_mo||[]), ...(state.facture.lignes_forfait||[])].map((l,i)=>`
+    <tr>
+      <td>${l.label}</td>
+      <td style="width:90px">${l.h.toFixed(2)}</td>
+      <td style="width:120px">${fmtEuro(l.pu)}</td>
+      <td style="width:120px">${fmtEuro(l.total)}</td>
+      ${state.facture.lignes_forfait.includes(l) ? `<td style="width:46px"><button class="ghost no-print" onclick="removeForfait(${i - (state.facture.lignes_mo||[]).length})">✕</button></td>` : '<td></td>'}
+    </tr>
+  `).join('');
+
+  renderCard(`
+    <div class="no-print">
+      <h2>Facture (auto)</h2>
+      <div class="small">Client: <b>MIKADAN</b> – 467 avenue Jean Moulin – 60880 Jaux</div>
+      <div class="grid2">
+        <div>
+          <label>Taux MO (€ HT/h)</label>
+          <input type="number" step="0.01" value="${state.facture.taux_mo}" oninput="state.facture.taux_mo=Number(this.value); persistAndRender();">
+        </div>
+        <div>
+          <label>TVA (%)</label>
+          <input type="number" step="0.01" value="${state.facture.tva_tx}" oninput="state.facture.tva_tx=Number(this.value); persistAndRender();">
+        </div>
+      </div>
+      <label>Mode de règlement</label>
+      <select onchange="state.facture.mode_reglement=this.value; persistAndRender();">
+        ${['Virement','CB','Espèces','Chèque'].map(x=>`<option ${state.facture.mode_reglement===x?'selected':''}>${x}</option>`).join('')}
+      </select>
+      <hr>
+    </div>
+
+    <h3>Main-d’œuvre</h3>
+    <table>
+      <thead><tr><th>Désignation</th><th>Temps (h)</th><th>PU</th><th>Total HT</th><th class="no-print"></th></tr></thead>
+      <tbody>${moRows || '<tr><td colspan="5" class="small">Aucune ligne MO automatique pour l’instant.</td></tr>'}</tbody>
+    </table>
+
+    <div class="no-print" style="margin-top:10px">
+      <div class="grid2">
+        <div>
+          <label>Ajouter une intervention (barème)</label>
+          <select id="baremeSel">${opts}</select>
+        </div>
+        <div>
+          <label>Quantité</label>
+          <input id="baremeQty" type="number" value="1" step="1" min="1">
+        </div>
+      </div>
+      <button onclick="addMOLineFromBareme()">➕ Ajouter intervention</button>
+    </div>
+
+    <hr>
+    <h3>Pièces (achat HT → vente HT = +10%)</h3>
+    <table>
+      <thead><tr><th>Désignation</th><th>Qté</th><th>Achat HT</th><th>Vente HT</th><th>Total HT</th><th class="no-print"></th></tr></thead>
+      <tbody>${piecesRows || '<tr><td colspan="6" class="small">Ajoute les pièces du BL (saisies rapides).</td></tr>'}</tbody>
+    </table>
+    <div class="no-print">
+      <button onclick="addPieceLine()">➕ Ajouter pièce</button>
+    </div>
+
+    <hr>
+    <h3>Totaux</h3>
+    <table>
+      <tbody>
+        <tr><td>Total MO HT</td><td style="text-align:right">${fmtEuro(t.mo)}</td></tr>
+        <tr><td>Total Pièces HT</td><td style="text-align:right">${fmtEuro(t.pieces)}</td></tr>
+        <tr><td><b>Total HT</b></td><td style="text-align:right"><b>${fmtEuro(t.ht)}</b></td></tr>
+        <tr><td>TVA (${Number(state.facture.tva_tx||0).toFixed(2)}%)</td><td style="text-align:right">${fmtEuro(t.tva)}</td></tr>
+        <tr><td style="font-size:18px"><b>Net à payer</b></td><td style="text-align:right;font-size:18px"><b>${fmtEuro(t.ttc)}</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="print-only" style="margin-top:14px">
+      <div><b>Mode de règlement:</b> ${state.facture.mode_reglement}</div>
+      <div><b>IBAN:</b> FR76 1627 5000 1108 0005 2907 889</div>
+      <div><b>BIC:</b> CEPAFRPP627</div>
+      <div class="small">Mécano: ${state.vehicule?.mecano || ''} — Véhicule: ${state.vehicule?.marque||''} ${state.vehicule?.modele||''} — Immat: ${state.vehicule?.immat||''} — KM: ${state.vehicule?.km||''}</div>
+    </div>
+
+    <div class="no-print" style="display:flex;gap:10px">
+      <button class="ghost" onclick="back()">← Retour</button>
+      <button onclick="openPrint()">🧾 Générer PDF</button>
+    </div>
+  `);
+}
+function openPrint(){
+  // Use print CSS; just call window.print
+  window.print();
+}
+
+function gotoFacture(){
+  // push a virtual step by setting stepIndex to render facture
+  state._ui = state._ui || {};
+  state._ui.show_facture = true;
+  persistAndRender();
+}
+
+function closeFacture(){
+  if(state._ui) state._ui.show_facture = false;
+  persistAndRender();
+}
+
+function persistAndRender(){
+  save();
+  render();
+}
+
+async function runOcrOnFileId(fileId, lang='fra') {
+  const blob = await getFileBlob(fileId);
+  if(!blob) throw new Error('Image introuvable');
+  const url = URL.createObjectURL(blob);
+
+  if(!window.Tesseract) throw new Error("OCR non chargé (Tesseract.js). Vérifie la connexion Internet.");
+  const prog = document.getElementById('ocrProgress');
+  const worker = await Tesseract.createWorker(lang, 1, {
+    logger: m => { if(prog && m.status) prog.textContent = `${m.status} ${Math.round((m.progress||0)*100)}%`; }
+  });
+  try{
+    const { data } = await worker.recognize(url);
+    return (data && data.text) ? data.text : '';
+  } finally {
+    await worker.terminate();
+    URL.revokeObjectURL(url);
+    if(prog) prog.textContent = '';
+  }
+}
+
+function cleanOcrText(t){
+  return (t||'')
+    .replace(/\r/g,'')
+    .replace(/[\u00A0]/g,' ')
+    .replace(/[ ]{2,}/g,' ')
+    .trim();
+}
+
+function parseBLTextToPieces(rawText){
+  const text = cleanOcrText(rawText);
+  const lines = text.split('\n').map(l=>l.trim()).filter(Boolean);
+
+  const pieces = [];
+  const keepLines = [];
+  const amtRe = /(\d+[\.,]\d{2})/g;
+
+  for (const l of lines) {
+    if (/\b(total|tva|ttc|ht|montant\s*total|facture|bon\s*de\s*livraison|remise)\b/i.test(l)) continue;
+
+    const amts = l.match(amtRe);
+    if (!amts || amts.length === 0) continue;
+
+    const amtStr = amts[amts.length-1].replace(',', '.');
+    const amt = Number(amtStr);
+    if (!isFinite(amt) || amt <= 0) continue;
+
+    let qty = 1;
+    const qtyMatch = l.match(/\b(\d{1,2})\b/);
+    if (qtyMatch) {
+      const q = Number(qtyMatch[1]);
+      if (q >= 1 && q <= 99) qty = q;
+    }
+
+    let desc = l.replace(amtRe, '').replace(/\s{2,}/g,' ').trim();
+    if (desc.length < 3) desc = l;
+
+    keepLines.push(`${qty} x ${desc} — ${amt.toFixed(2)} HT`);
+    pieces.push({ desc, qty, achat_ht: round2(amt/qty) });
+  }
+
+  return { linesText: keepLines.join('\n'), pieces };
+}
