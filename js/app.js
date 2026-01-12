@@ -25,6 +25,9 @@
     facture: { lignes: [] }
   };
 
+  let SAVED_STATE = null;
+
+
   const marques = [
     'AUDI','BMW','CITROEN','DACIA','FIAT','FORD','HONDA','HYUNDAI','KIA','MAZDA','MERCEDES','MINI','NISSAN',
     'OPEL','PEUGEOT','RENAULT','SEAT','SKODA','TOYOTA','VOLKSWAGEN','VOLVO','AUTRE'
@@ -35,10 +38,13 @@
   function loadState(){
     try{
       const s = localStorage.getItem(STORAGE_KEY);
-      if(!s) return structuredClone(DEFAULT_STATE);
-      const obj = JSON.parse(s);
-      return Object.assign(structuredClone(DEFAULT_STATE), obj);
-    }catch{
+      if(!s) { SAVED_STATE = null; return structuredClone(DEFAULT_STATE); }
+      // On démarre toujours à l'étape 1 (immatriculation).
+      // Le dossier précédent reste accessible via "Reprendre dossier".
+      SAVED_STATE = Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(s));
+      return structuredClone(DEFAULT_STATE);
+    }catch(e){
+      SAVED_STATE = null;
       return structuredClone(DEFAULT_STATE);
     }
   }
