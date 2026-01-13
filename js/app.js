@@ -1,729 +1,509 @@
-(function(){
-  'use strict';
-
-  window.addEventListener('error', function(e){
-    showFatal("Erreur JS: " + (e && e.message ? e.message : "inconnue"));
-  });
-  window.addEventListener('unhandledrejection', function(e){
-    showFatal("Erreur Promise: " + (e && e.reason ? String(e.reason) : "inconnue"));
-  });
-
-  const STORAGE_KEY = 'FACTU_DOSSIER_V1_4_5';
-  const TVA = 0.20;
-  const TAUX_HORAIRE = 60.00;
-  const MARGE_PIECES = 0.10;
-
-  const DEFAULT_STATE = {
-    version: '1.4.5',
-    created_at: new Date().toISOString(),
-    etape: 1,
-    vehicule: { immat_raw:'', immat:'', km:'', marque:'', modele:'', mecano:'SYLVAIN' },
-    controle100: { fait:false, photo:null },
-    a5: { photo:null, texte:'' },
-    bl: { photos: [], lignes:'' },
-    divers: { autres_interventions:'' },
-    facture: { lignes: [] }
-  };
-
-  let SAVED_STATE = null;
+// --- Cache purge / SW cleanup (prevents old buggy versions from being served) ---
+(async () => {
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const r of regs) { try { await r.unregister(); } catch(e){} }
+    }
+    if (window.caches && caches.keys) {
+      const keys = await caches.keys();
+      for (const k of keys) { try { await caches.delete(k); } catch(e){} }
+    }
+  } catch (e) { /* ignore */ }
+})();
 
 
-  const marques = [
-    'AUDI','BMW','CITROEN','DACIA','FIAT','FORD','HONDA','HYUNDAI','KIA','MAZDA','MERCEDES','MINI','NISSAN',
-    'OPEL','PEUGEOT','RENAULT','SEAT','SKODA','TOYOTA','VOLKSWAGEN','VOLVO','AUTRE'
+(() => {
+  "use strict";
+
+  const $ = (sel) => document.querySelector(sel);
+  const STORAGE_KEY = "factu_atelier_v1_regen";
+  const BRANDS = {"AUDI": ["A1", "A3", "A4", "A5", "A6", "Q2", "Q3", "Q5", "Q7", "AUTRE"], "BMW": ["Série 1", "Série 2", "Série 3", "Série 4", "Série 5", "X1", "X3", "X5", "AUTRE"], "MERCEDES": ["Classe A", "Classe B", "Classe C", "Classe E", "GLA", "GLC", "AUTRE"], "PEUGEOT": ["108", "208", "2008", "308", "3008", "508", "AUTRE"], "RENAULT": ["Clio", "Captur", "Megane", "Scenic", "Kadjar", "Austral", "AUTRE"], "CITROEN": ["C1", "C3", "C4", "C5", "Berlingo", "AUTRE"], "VOLKSWAGEN": ["Polo", "Golf", "T-Roc", "Tiguan", "Passat", "AUTRE"], "TOYOTA": ["Yaris", "Corolla", "C-HR", "RAV4", "AUTRE"], "OPEL": ["Corsa", "Astra", "Mokka", "Grandland", "AUTRE"], "FORD": ["Fiesta", "Focus", "Puma", "Kuga", "AUTRE"], "AUTRE": ["AUTRE"]};
+
+  const state = loadState();
+
+  const steps = [
+    { key: "immat",   title: "Immatriculation", render: renderImmat,   validate: validateImmat },
+    { key: "km",      title: "Kilométrage",     render: renderKm,      validate: validateKm },
+    { key: "marque",  title: "Marque",          render: renderMarque,  validate: validateMarque },
+    { key: "modele",  title: "Modèle",          render: renderModele,  validate: validateModele },
+    { key: "mecano",  title: "Mécano",          render: renderMecano,  validate: validateMecano },
+    { key: "p100",    title: "100 points",      render: render100,     validate: validate100 },
+    { key: "photos",  title: "Photos",          render: renderPhotos,  validate: validatePhotos },
+    { key: "recap",   title: "Récap",           render: renderRecap,   validate: () => ({ ok:true }) },
   ];
 
-  function structuredClone(obj){ return JSON.parse(JSON.stringify(obj)); }
+  if (typeof state.stepIndex !== "number") state.stepIndex = 0;
 
   function loadState(){
     try{
-      const s = localStorage.getItem(STORAGE_KEY);
-      if(!s) { SAVED_STATE = null; return structuredClone(DEFAULT_STATE); }
-      // On démarre toujours à l'étape 1 (immatriculation).
-      // Le dossier précédent reste accessible via "Reprendre dossier".
-      SAVED_STATE = Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(s));
-      return structuredClone(DEFAULT_STATE);
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if(!raw) return freshState();
+      const s = JSON.parse(raw);
+      s.photos = s.photos || { a5:null, or:null, bl1:null };
+      if(typeof s.stepIndex !== "number") s.stepIndex = 0;
+      return s;
     }catch(e){
-      SAVED_STATE = null;
-      return structuredClone(DEFAULT_STATE);
+      return freshState();
     }
   }
-  function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-  function resetState(){ state = structuredClone(DEFAULT_STATE); saveState(); render(); }
 
-  function normalizeImmat(raw){
-    const up = (raw||'').toUpperCase().replace(/\s+/g,'').replace(/-/g,'');
-    const m = up.match(/^([A-Z]{2})(\d{3})([A-Z]{2})$/);
-    if(m) return `${m[1]}-${m[2]}-${m[3]}`;
-    return up;
+  function freshState(){
+    return {
+      stepIndex: 0,
+      immat_raw: "",
+      immat: "",
+      km: "",
+      marque: "",
+      modele: "",
+      mecano: "SYLVAIN",
+      p100_done: false,
+      photos: { a5:null, or:null, bl1:null }
+    };
   }
 
-  function euro(n){
-    const x = (Math.round((Number(n)||0)*100)/100).toFixed(2);
-    return x.replace('.',',') + ' €';
-  }
-  function num2(n){ return (Math.round((Number(n)||0)*100)/100).toFixed(2); }
-
-  function priceWithMargin(achatHT){
-    return Math.round((Number(achatHT)*(1+MARGE_PIECES))*100)/100;
+  function saveState(){
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }
 
-  function showFatal(msg){
-    const root = document.getElementById('app');
-    if(!root) return;
-    root.innerHTML = `
-      <div class="container">
-        <h1>Facturation Atelier</h1>
-        <p class="sub">Erreur de chargement</p>
-        <div class="card">
-          <div class="pill no">Bloqué</div>
-          <p style="margin-top:10px"><b>${escapeHtml(msg)}</b></p>
-          <p class="small">Astuce : rafraîchir (⌘R) puis réessayer. Si ça persiste, envoyer une capture de la console.</p>
-        </div>
-      </div>`;
-  }
-  function escapeHtml(s){
-    return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-  }
-
-  async function ensureTesseract(){
-    if(window.Tesseract) return window.Tesseract;
-    await new Promise((resolve, reject)=>{
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-      script.onload = resolve;
-      script.onerror = ()=>reject(new Error('Impossible de charger Tesseract.js (réseau).'));
-      document.head.appendChild(script);
-    });
-    return window.Tesseract;
-  }
-  async function runOCRFromFile(file){
-    const T = await ensureTesseract();
-    const { data } = await T.recognize(file, 'fra');
-    return (data && data.text) ? data.text : '';
-  }
-
-  let state = loadState();
-
-  function goto(n){
-    state.etape = n;
+  function setStep(i){
+    state.stepIndex = Math.max(0, Math.min(i, steps.length-1));
     saveState();
     render();
-    window.scrollTo({top:0, behavior:'smooth'});
-  }
-  function next(){ if(state.etape < 14) goto(state.etape + 1); }
-  function prev(){ if(state.etape > 1) goto(state.etape - 1); }
-
-  function vehicleOK(){
-    const v = state.vehicule;
-    return !!(v.immat && v.km && v.marque && v.modele && v.mecano);
-  }
-  function recapBadges(){
-    return { vehicule: vehicleOK(), c100: state.controle100.fait, a5: !!state.a5.photo, blReq: true, blPhotos: state.bl.photos.length };
+    window.scrollTo({top:0, behavior:"smooth"});
   }
 
-  function render(){
-    const root = document.getElementById('app');
-    if(!root) return;
-    const et = state.etape;
-    root.innerHTML = `
+  function newDossier(){
+    localStorage.removeItem(STORAGE_KEY);
+    location.reload();
+  }
+
+  function resumeDossier(){
+    render();
+    window.scrollTo({top:0, behavior:"smooth"});
+  }
+
+  function safeText(v){ return (v ?? "").toString(); }
+
+  function normalizeImmat(input){
+    const s = safeText(input).toUpperCase().replace(/[^A-Z0-9]/g,"");
+    const m = s.match(/^([A-Z]{2})(\d{3})([A-Z]{2})/);
+    if(!m) return { formatted: "", ok:false };
+    return { formatted: `${m[1]}-${m[2]}-${m[3]}`, ok:true };
+  }
+
+  function makeLayout(innerHtml){
+    const stepNo = state.stepIndex + 1;
+    const total = steps.length;
+    return `
       <div class="container">
         <h1>Facturation Atelier</h1>
-        <p class="sub">Étape ${et}/14</p>
-        ${renderStep(et)}
+        <p class="sub">Étape ${stepNo}/${total}</p>
+        <div class="card">${innerHtml}</div>
       </div>
-      <div class="footerbar">
+
+      <div class="bottombar">
         <div class="inner">
           <button class="btn secondary" id="btnResume">Reprendre dossier</button>
           <button class="btn danger" id="btnNew">Nouveau dossier</button>
         </div>
       </div>
     `;
-    document.getElementById('btnNew').addEventListener('click', resetState);
-    document.getElementById('btnResume').addEventListener('click', ()=>goto(state.etape || 1));
-    hookStep(et);
   }
 
-  function renderStep(et){
-    switch(et){
-      case 1: return stepImmat();
-      case 2: return stepKm();
-      case 3: return stepMarque();
-      case 4: return stepModele();
-      case 5: return stepMecano();
-      case 6: return stepControle100();
-      case 7: return stepControlePhoto();
-      case 8: return stepA5Photo();
-      case 9: return stepA5Travaux();
-      case 10:return stepAutres();
-      case 11:return stepBLPhoto();
-      case 12:return stepBLTexte();
-      case 13:return stepGenerer();
-      case 14:return stepRecap();
-      default: return stepRecap();
+  function render(){
+    const step = steps[state.stepIndex];
+    $("#app").innerHTML = makeLayout(step.render());
+    hookBottomBar();
+    hookStepCommon(step);
+    hookStepSpecific(step);
+  }
+
+  function hookBottomBar(){
+    $("#btnNew").addEventListener("click", () => {
+      if(confirm("Créer un nouveau dossier ? (Cela efface les données locales)")){
+        newDossier();
+      }
+    });
+    $("#btnResume").addEventListener("click", resumeDossier);
+  }
+
+  function hookStepCommon(step){
+    const btnPrev = $("#btnPrev");
+    const btnNext = $("#btnNext");
+    const errBox = $("#errBox");
+
+    const update = () => {
+      const res = step.validate();
+      if(btnNext) btnNext.disabled = !res.ok;
+      if(errBox){
+        errBox.style.display = res.ok ? "none" : "block";
+        errBox.textContent = res.ok ? "" : res.msg;
+      }
+    };
+
+    if(btnPrev){
+      btnPrev.addEventListener("click", () => setStep(state.stepIndex - 1));
     }
-  }
-
-  // IMPORTANT : on ne désactive JAMAIS le bouton "Suivant".
-  // Sur certains navigateurs (cache/PWA), l'état "disabled" peut rester bloqué
-  // même après une saisie. On valide donc au clic avec un message clair.
-  function navButtons(nextLabel='Suivant', prevLabel='Retour'){
-    return `
-      <div class="btnbar">
-        <button class="btn secondary" id="btnPrev">${prevLabel}</button>
-        <button class="btn" id="btnNext">${nextLabel}</button>
-      </div>`;
-  }
-
-  function stepImmat(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Immatriculation</h2>
-        <div class="small">Format final automatique : AA-123-AA. Tu valides ensuite.</div>
-        <label>Immat (saisie libre)</label>
-        <input id="immat" placeholder="ex: ev957na ou EV-957-NA" value="${escapeHtml(state.vehicule.immat_raw || '')}" />
-        <label>Immat proposée</label>
-        <input id="immatFmt" disabled value="${escapeHtml(state.vehicule.immat || '')}" />
-        ${navButtons('Valider', 'Retour', true)}
-      </div>`;
-  }
-  function stepKm(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Kilométrage</h2>
-        <label>Km</label>
-        <input id="km" inputmode="numeric" placeholder="ex: 139634" value="${escapeHtml(state.vehicule.km || '')}" />
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepMarque(){
-    const opts = marques.map(m=>`<option ${state.vehicule.marque===m?'selected':''} value="${m}">${m}</option>`).join('');
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Marque</h2>
-        <label>Choisir la marque</label>
-        <select id="marque">${opts}</select>
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.marque)}
-      </div>`;
-  }
-  function stepModele(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Modèle</h2>
-        <label>Modèle</label>
-        <input id="modele" placeholder="ex: Classe A / Série 1 / 308…" value="${escapeHtml(state.vehicule.modele || '')}" />
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.modele)}
-      </div>`;
-  }
-  function stepMecano(){
-    const cur = state.vehicule.mecano || 'SYLVAIN';
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Mécano</h2>
-        <div class="row">
-          <button class="btn dark" id="mSyl" style="flex:1">${cur==='SYLVAIN'?'✅ ':''}SYLVAIN</button>
-          <button class="btn secondary" id="mAutre" style="flex:1">${cur!=='SYLVAIN'?'✅ ':''}AUTRE</button>
-        </div>
-        <div id="autreWrap" class="${cur==='SYLVAIN'?'hidden':''}">
-          <label>Prénom (autre)</label>
-          <input id="mecanoAutre" value="${escapeHtml(cur==='SYLVAIN'?'':cur)}" placeholder="ex: THELMA" />
-        </div>
-        ${navButtons('Suivant', 'Retour', !!state.vehicule.mecano)}
-      </div>`;
-  }
-  function stepControle100(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">100 points de contrôle</h2>
-        <div class="photo">
-          <div>
-            <div><b>Contrôle 100 points effectué</b></div>
-            <div class="small">À facturer : 0,50 h au taux horaire (${num2(TAUX_HORAIRE)} €/h).</div>
-          </div>
-          <label style="display:flex;align-items:center;gap:10px;margin:0">
-            <input type="checkbox" id="c100" ${state.controle100.fait?'checked':''} />
-            Oui
-          </label>
-        </div>
-        ${navButtons('Suivant', 'Retour', state.controle100.fait)}
-      </div>`;
-  }
-  function stepControlePhoto(){
-    const has = !!state.controle100.photo;
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Photo fiche 100 points (archive)</h2>
-        <div class="small">Optionnel pour l’instant, mais recommandé.</div>
-        <div class="btnbar">
-          <label class="btn dark" style="flex:1;text-align:center">
-            📷 Ajouter photo
-            <input class="hidden" id="photoC100" type="file" accept="image/*" capture="environment">
-          </label>
-          <button class="btn secondary" id="btnClearC100" style="flex:1" ${has?'':'disabled style="opacity:.5"'}>Supprimer</button>
-        </div>
-        <div class="small" style="margin-top:10px">${has?'✅ Photo ajoutée':'Aucune photo'}</div>
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepA5Photo(){
-    const has = !!state.a5.photo;
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Photo OR A5</h2>
-        <div class="btnbar">
-          <label class="btn dark" style="flex:1;text-align:center">
-            📷 Ajouter photo A5
-            <input class="hidden" id="photoA5" type="file" accept="image/*" capture="environment">
-          </label>
-          <button class="btn secondary" id="btnClearA5" style="flex:1" ${has?'':'disabled style="opacity:.5"'}>Supprimer</button>
-        </div>
-
-        <div style="margin-top:12px" class="photo">
-          <div>
-            <div><b>OCR (optionnel)</b></div>
-            <div class="small">Ne bloque jamais l’app. Nécessite Internet.</div>
-          </div>
-          <label class="btn dark" style="margin:0;flex:1;text-align:center">
-            🔎 OCR sur A5
-            <input class="hidden" id="ocrA5File" type="file" accept="image/*">
-          </label>
-        </div>
-
-        <div class="small" style="margin-top:10px">${has?'✅ Photo A5 ajoutée':'Aucune photo A5'}</div>
-        ${navButtons('Suivant', 'Retour', has)}
-      </div>`;
-  }
-  function stepA5Travaux(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Travaux / éléments montés</h2>
-        <div class="small">Saisir/corriger. L’OCR peut remplir ce champ.</div>
-        <label>Travaux</label>
-        <textarea id="a5txt" placeholder="Ex:\nTriangle suspension G 1h\nTriangle suspension D 1h\nPlaquettes AR\nBalais AV/AR">${escapeHtml(state.a5.texte||'')}</textarea>
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepAutres(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Autre intervention (optionnel)</h2>
-        <div class="small">Ex: démontage accessoires, faisceau, permutation pneus, etc.</div>
-        <textarea id="autres" placeholder="Décris ici si besoin…">${escapeHtml(state.divers.autres_interventions||'')}</textarea>
-        ${navButtons('Suivant', 'Retour', true)}
-      </div>`;
-  }
-  function stepBLPhoto(){
-    const c = state.bl.photos.length;
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Photos BL / factures pièces</h2>
-        <div class="small">Tu peux ajouter plusieurs pages. (BL = pièces achetées)</div>
-
-        <div class="btnbar">
-          <label class="btn dark" style="flex:1;text-align:center">
-            📷 Ajouter BL (page)
-            <input class="hidden" id="photoBL" type="file" accept="image/*" capture="environment" multiple>
-          </label>
-          <button class="btn secondary" id="btnClearBL" style="flex:1" ${c?'' :'disabled style="opacity:.5"'}>Tout supprimer</button>
-        </div>
-
-        <div style="margin-top:12px" class="photo">
-          <div>
-            <div><b>OCR (optionnel)</b></div>
-            <div class="small">OCR sur la 1ère page BL, puis coller/corriger dans “Lignes BL”.</div>
-          </div>
-          <label class="btn dark" style="margin:0;flex:1;text-align:center">
-            🔎 OCR sur BL
-            <input class="hidden" id="ocrBLFile" type="file" accept="image/*">
-          </label>
-        </div>
-
-        <div class="small" style="margin-top:10px">Pages ajoutées : <b>${c}</b></div>
-        ${navButtons('Suivant', 'Retour', c>0)}
-      </div>`;
-  }
-  function stepBLTexte(){
-    return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Lignes BL (saisie rapide)</h2>
-        <div class="small">1 ligne = 1 pièce facturable : “Désignation — MontantHT”. On prend le montant après remise.</div>
-        <label>Lignes</label>
-        <textarea id="bllignes" placeholder="Ex:\nPlaquettes AR — 28,58\nDisques AR — 70,08\nBalais AV — 13,20">${escapeHtml(state.bl.lignes||'')}</textarea>
-        ${navButtons('Générer facture', 'Retour', true)}
-      </div>`;
-  }
-
-  function parseBLLines(text){
-    const lines = (text||'').split('\n').map(l=>l.trim()).filter(Boolean);
-    const out = [];
-    for(const l of lines){
-      const m = l.match(/^(.*?)(?:—|-|:)\s*([0-9]+(?:[.,][0-9]{1,2})?)\s*$/);
-      if(!m) continue;
-      const des = m[1].trim();
-      const amt = parseFloat(m[2].replace(',','.'));
-      if(!des || isNaN(amt)) continue;
-      out.push({designation: des, achat_ht: Math.round(amt*100)/100});
+    if(btnNext){
+      btnNext.addEventListener("click", () => {
+        const res = step.validate();
+        if(!res.ok){ update(); return; }
+        if(step.key === "recap"){
+          setStep(0);
+          return;
+        }
+        setStep(state.stepIndex + 1);
+      });
     }
-    return out;
+
+    window.__stepUpdate = update;
+    update();
   }
 
-  function buildFacture(){
-    const lignes = [];
-    if(state.controle100.fait){
-      lignes.push({ type:'MO', designation:'Contrôle 100 points', qte: 0.50, pu_ht: TAUX_HORAIRE, mt_ht: Math.round((0.50*TAUX_HORAIRE)*100)/100 });
-    }
-    const a5 = (state.a5.texte||'').toLowerCase();
-    if(a5.includes('triangle') && a5.includes('1h')){
-      const count = (a5.match(/triangle/g)||[]).length || 1;
-      for(let i=0;i<count;i++){
-        lignes.push({ type:'MO', designation:'Triangle suspension (barème)', qte: 1.00, pu_ht: TAUX_HORAIRE, mt_ht: Math.round((1.00*TAUX_HORAIRE)*100)/100 });
+  function hookStepSpecific(step){
+    if(step.key === "immat"){
+      const el = $("#immat");
+      if(el){
+        el.addEventListener("input", () => {
+          const n = normalizeImmat(el.value);
+          state.immat_raw = el.value;
+          state.immat = n.formatted;
+          saveState();
+          render(); // refresh badge
+        });
       }
     }
-    if(a5.includes('frein') && (a5.includes('plaquette') || a5.includes('plaquettes')) && a5.includes('avant')){
-      lignes.push({ type:'MO', designation:'Freins AV (disques + plaquettes) — barème', qte: 2.00, pu_ht: TAUX_HORAIRE, mt_ht: Math.round((2.00*TAUX_HORAIRE)*100)/100 });
+    if(step.key === "km"){
+      const el = $("#km");
+      if(el){
+        el.addEventListener("input", () => {
+          const v = el.value.replace(/[^\d]/g,"");
+          if(v !== el.value) el.value = v;
+          state.km = v;
+          saveState();
+          window.__stepUpdate && window.__stepUpdate();
+        });
+      }
     }
-    const bl = parseBLLines(state.bl.lignes);
-    bl.forEach(p=>{
-      const vente = priceWithMargin(p.achat_ht);
-      lignes.push({ type:'PIECE', designation:p.designation, qte:1, pu_ht: vente, mt_ht: vente });
-    });
-    if(state.divers.autres_interventions && state.divers.autres_interventions.trim()){
-      lignes.push({ type:'NOTE', designation:`Autre intervention: ${state.divers.autres_interventions.trim()}`, qte:'', pu_ht:'', mt_ht:'' });
+    if(step.key === "marque"){
+      const el = $("#marque");
+      if(el){
+        el.addEventListener("change", () => {
+          const prev = state.marque;
+          state.marque = el.value || "";
+          if(state.marque !== prev) state.modele = "";
+          saveState();
+          window.__stepUpdate && window.__stepUpdate();
+        });
+      }
     }
-    state.facture.lignes = lignes;
+    if(step.key === "modele"){
+      const el = $("#modele");
+      if(el){
+        el.addEventListener("change", () => {
+          state.modele = el.value || "";
+          saveState();
+          window.__stepUpdate && window.__stepUpdate();
+        });
+      }
+    }
+    if(step.key === "mecano"){
+      const el = $("#mecano");
+      if(el){
+        el.addEventListener("change", () => {
+          state.mecano = el.value || "SYLVAIN";
+          saveState();
+          window.__stepUpdate && window.__stepUpdate();
+        });
+      }
+    }
+    if(step.key === "p100"){
+      const el = $("#p100");
+      if(el){
+        el.addEventListener("change", () => {
+          state.p100_done = !!el.checked;
+          saveState();
+          window.__stepUpdate && window.__stepUpdate();
+        });
+      }
+    }
+    if(step.key === "photos"){
+      ["a5","or","bl1"].forEach((k)=>{
+        const input = $(`#photo_${k}`);
+        if(input && !input.__bound){
+          input.__bound = true;
+          input.addEventListener("change", async () => {
+            const file = input.files && input.files[0];
+            if(!file) return;
+            const dataUrl = await fileToDataUrl(file, 1400);
+            state.photos[k] = dataUrl;
+            saveState();
+            render();
+          });
+        }
+      });
+    }
   }
 
-  function totals(){
-    const lignes = state.facture.lignes || [];
-    let ht=0;
-    for(const l of lignes){
-      const v = Number(l.mt_ht);
-      if(!isNaN(v)) ht += v;
-    }
-    ht = Math.round(ht*100)/100;
-    const tva = Math.round((ht*TVA)*100)/100;
-    const ttc = Math.round((ht+tva)*100)/100;
-    return {ht, tva, ttc};
-  }
-
-  function stepGenerer(){
-    try{ buildFacture(); saveState(); }catch(e){}
-    const t = totals();
-    const rows = (state.facture.lignes||[]).map(l=>{
-      const q = (l.qte===''||l.qte===null||l.qte===undefined) ? '' : (typeof l.qte==='number'? num2(l.qte) : l.qte);
-      const pu = (typeof l.pu_ht==='number') ? euro(l.pu_ht) : (l.pu_ht||'');
-      const mt = (typeof l.mt_ht==='number') ? euro(l.mt_ht) : (l.mt_ht||'');
-      return `<tr>
-        <td>${escapeHtml(l.designation||'')}</td>
-        <td style="text-align:right">${escapeHtml(String(q))}</td>
-        <td style="text-align:right">${escapeHtml(String(pu))}</td>
-        <td style="text-align:right"><b>${escapeHtml(String(mt))}</b></td>
-      </tr>`;
-    }).join('');
-
+  function btnBar(){
+    const prevDisabled = state.stepIndex === 0 ? "disabled" : "";
     return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Générer facture (aperçu)</h2>
-        <div class="small">Règles : pièces = achat HT (après remise) +10% ; TVA 20% ; MO ${num2(TAUX_HORAIRE)} €/h.</div>
-
-        <div style="overflow:auto;margin-top:12px">
-          <table style="width:100%;border-collapse:collapse">
-            <thead>
-              <tr>
-                <th style="text-align:left;border-bottom:1px solid var(--border);padding:8px 6px">Désignation</th>
-                <th style="text-align:right;border-bottom:1px solid var(--border);padding:8px 6px">Qté/Temps</th>
-                <th style="text-align:right;border-bottom:1px solid var(--border);padding:8px 6px">PU HT</th>
-                <th style="text-align:right;border-bottom:1px solid var(--border);padding:8px 6px">Mt HT</th>
-              </tr>
-            </thead>
-            <tbody>${rows || '<tr><td colspan="4" class="small" style="padding:10px">Aucune ligne</td></tr>'}</tbody>
-          </table>
-        </div>
-
-        <hr/>
-        <div class="row">
-          <div class="col"><div class="small">Total HT</div><div style="font-size:22px;font-weight:900">${euro(t.ht)}</div></div>
-          <div class="col"><div class="small">TVA 20%</div><div style="font-size:22px;font-weight:900">${euro(t.tva)}</div></div>
-          <div class="col"><div class="small">Total TTC</div><div style="font-size:22px;font-weight:900">${euro(t.ttc)}</div></div>
-        </div>
-
-        <div class="btnbar" style="margin-top:16px">
-          <button class="btn secondary" id="btnEdit">Modifier lignes BL/A5</button>
-          <button class="btn" id="btnRecap">Continuer</button>
-        </div>
+      <div class="btnbar">
+        <button class="btn secondary" id="btnPrev" ${prevDisabled}>Retour</button>
+        <button class="btn primary" id="btnNext">Suivant</button>
       </div>
+      <div class="error" id="errBox" style="display:none"></div>
     `;
   }
 
-  function stepRecap(){
-    const r = recapBadges();
-    const j = escapeHtml(JSON.stringify({
-      immat: state.vehicule.immat,
-      immat_raw: state.vehicule.immat_raw,
-      km: state.vehicule.km,
-      marque: state.vehicule.marque,
-      modele: state.vehicule.modele,
-      mecano: state.vehicule.mecano,
-      bl_photos: state.bl.photos.length
-    }, null, 2));
+  function renderImmat(){
     return `
-      <div class="card">
-        <h2 style="margin:0 0 8px">Récap</h2>
-        <div class="row" style="gap:8px;margin-bottom:12px">
-          <span>Véhicule :</span> <span class="pill ${r.vehicule?'ok':'no'}">${r.vehicule?'OK':'MANQUANT'}</span>
-          <span>100 points :</span> <span class="pill ${r.c100?'ok':'no'}">${r.c100?'OK':'NON'}</span>
-          <span>A5 :</span> <span class="pill ${r.a5?'ok':'no'}">${r.a5?'OK':'NON'}</span>
-          <span>BL photos :</span> <span class="pill ${r.blPhotos>0?'ok':'no'}">${r.blPhotos}</span>
-        </div>
+      <h2>Immatriculation</h2>
+      <label>Immatriculation (obligatoire)</label>
+      <input id="immat" placeholder="Ex: EV957NA ou EV-957-NA" value="${escapeHtml(state.immat_raw || "")}" />
+      <div class="help">Format final : AA-123-AA. On met en majuscules automatiquement.</div>
 
-        <pre style="white-space:pre-wrap;background:#0b0b0f;color:#e5e7eb;padding:12px;border-radius:12px;overflow:auto">${j}</pre>
+      <div class="kv">
+        <span class="badge gray">Actuel : <strong>${escapeHtml(state.immat || "—")}</strong></span>
+      </div>
 
-        <div class="btnbar">
-          <button class="btn secondary" id="btnBackGen">Retour</button>
-          <button class="btn dark" id="btnNew2">Nouveau dossier</button>
-        </div>
-      </div>`;
+      ${btnBar()}
+    `;
   }
 
-  function hookStep(et){
-    const prevBtn = document.getElementById('btnPrev');
-    const nextBtn = document.getElementById('btnNext');
-    if(prevBtn) prevBtn.addEventListener('click', prev);
-
-    if(nextBtn) nextBtn.addEventListener('click', async ()=>{
-      if(et===1){
-        const raw = document.getElementById('immat').value.trim();
-        const fmt = normalizeImmat(raw);
-        state.vehicule.immat_raw = raw;
-        state.vehicule.immat = fmt;
-        saveState();
-        document.getElementById('immatFmt').value = fmt;
-        if(!fmt || fmt.length<5){ alert("Immatriculation invalide. Saisis au moins AA123AA."); return; }
-        if(!confirm("Valider l'immatriculation : " + fmt + " ?")) return;
-        next(); return;
-      }
-      if(et===2){
-        const km = document.getElementById('km').value.replace(/\s+/g,'').trim();
-        state.vehicule.km = km; saveState();
-        if(!km){ alert("Kilométrage obligatoire."); return; }
-        next(); return;
-      }
-      if(et===3){
-        state.vehicule.marque = document.getElementById('marque').value; saveState();
-        if(!state.vehicule.marque){ alert("Marque obligatoire."); return; }
-        next(); return;
-      }
-      if(et===4){
-        state.vehicule.modele = document.getElementById('modele').value.trim(); saveState();
-        if(!state.vehicule.modele){ alert("Modèle obligatoire."); return; }
-        next(); return;
-      }
-      if(et===5){
-        if(state.vehicule.mecano && state.vehicule.mecano.trim()){ next(); return; }
-        alert("Prénom mécano obligatoire."); return;
-      }
-      if(et===6){
-        state.controle100.fait = document.getElementById('c100').checked; saveState();
-        if(!state.controle100.fait){ alert("Tu dois cocher '100 points effectué'."); return; }
-        next(); return;
-      }
-      if(et===8){
-        if(!state.a5.photo){ alert("Photo A5 obligatoire."); return; }
-        next(); return;
-      }
-      if(et===9){
-        state.a5.texte = document.getElementById('a5txt').value; saveState(); next(); return;
-      }
-      if(et===10){
-        state.divers.autres_interventions = document.getElementById('autres').value; saveState(); next(); return;
-      }
-      if(et===11){
-        if(state.bl.photos.length<1){ alert("Au moins 1 photo BL obligatoire."); return; }
-        next(); return;
-      }
-      if(et===12){
-        state.bl.lignes = document.getElementById('bllignes').value; saveState(); next(); return;
-      }
-      if(et===13){ goto(14); return; }
-      next();
-    });
-
-    if(et===1){
-      const immat = document.getElementById('immat');
-      const fmt = document.getElementById('immatFmt');
-      immat.addEventListener('input', ()=>{
-        const raw = immat.value.trim();
-        const out = normalizeImmat(raw);
-        state.vehicule.immat_raw = raw;
-        state.vehicule.immat = out;
-        fmt.value = out;
-        saveState();
-      });
-    }
-
-    if(et===5){
-      const mSyl = document.getElementById('mSyl');
-      const mAutre = document.getElementById('mAutre');
-      const inpt = document.getElementById('mecanoAutre');
-      mSyl.addEventListener('click', ()=>{ state.vehicule.mecano='SYLVAIN'; saveState(); render(); });
-      mAutre.addEventListener('click', ()=>{ state.vehicule.mecano=(inpt&&inpt.value.trim())?inpt.value.trim().toUpperCase():'AUTRE'; saveState(); render(); });
-      if(inpt){
-        inpt.addEventListener('input', ()=>{ const v=inpt.value.trim().toUpperCase(); state.vehicule.mecano=v||'AUTRE'; saveState(); });
-      }
-    }
-
-    if(et===6){
-      const c100 = document.getElementById('c100');
-      c100.addEventListener('change', ()=>{ state.controle100.fait=c100.checked; saveState(); render(); });
-    }
-
-    if(et===7){
-      const inp = document.getElementById('photoC100');
-      const clear = document.getElementById('btnClearC100');
-      inp.addEventListener('change', async ()=>{
-        const f = inp.files && inp.files[0];
-        if(!f) return;
-        state.controle100.photo = await fileToDataUrl(f);
-        saveState(); render();
-      });
-      if(clear) clear.addEventListener('click', ()=>{ state.controle100.photo=null; saveState(); render(); });
-    }
-
-    if(et===8){
-      const inp = document.getElementById('photoA5');
-      const clear = document.getElementById('btnClearA5');
-      const ocrFile = document.getElementById('ocrA5File');
-      inp.addEventListener('change', async ()=>{
-        const f = inp.files && inp.files[0];
-        if(!f) return;
-        state.a5.photo = await fileToDataUrl(f);
-        saveState(); render();
-      });
-      if(clear) clear.addEventListener('click', ()=>{ state.a5.photo=null; saveState(); render(); });
-      ocrFile.addEventListener('change', async ()=>{
-        const f = ocrFile.files && ocrFile.files[0];
-        if(!f) return;
-        try{
-          toast("OCR en cours…");
-          const txt = await runOCRFromFile(f);
-          state.a5.texte = (state.a5.texte ? (state.a5.texte+"\n") : "") + txt.trim();
-          saveState();
-          alert("OCR terminé. Texte ajouté dans 'Travaux'.");
-        }catch(e){
-          alert("OCR impossible: " + (e && e.message ? e.message : e));
-        }finally{
-          ocrFile.value='';
-        }
-      });
-    }
-
-    if(et===11){
-      const inp = document.getElementById('photoBL');
-      const clear = document.getElementById('btnClearBL');
-      const ocrFile = document.getElementById('ocrBLFile');
-      inp.addEventListener('change', async ()=>{
-        const files = Array.from(inp.files || []);
-        if(!files.length) return;
-        for(const f of files){ state.bl.photos.push(await fileToDataUrl(f)); }
-        saveState(); render();
-      });
-      if(clear) clear.addEventListener('click', ()=>{ state.bl.photos=[]; saveState(); render(); });
-      ocrFile.addEventListener('change', async ()=>{
-        const f = ocrFile.files && ocrFile.files[0];
-        if(!f) return;
-        try{
-          toast("OCR en cours…");
-          const txt = await runOCRFromFile(f);
-          state.bl.lignes = (state.bl.lignes ? (state.bl.lignes+"\n") : "") + txt.trim();
-          saveState();
-          alert("OCR terminé. Vérifie/corrige dans 'Lignes BL'.");
-        }catch(e){
-          alert("OCR impossible: " + (e && e.message ? e.message : e));
-        }finally{
-          ocrFile.value='';
-        }
-      });
-    }
-
-    if(et===13){
-      const edit = document.getElementById('btnEdit');
-      const recap = document.getElementById('btnRecap');
-      if(edit) edit.addEventListener('click', ()=>goto(9));
-      if(recap) recap.addEventListener('click', ()=>goto(14));
-    }
-
-    if(et===14){
-      const back = document.getElementById('btnBackGen');
-      const n2 = document.getElementById('btnNew2');
-      if(back) back.addEventListener('click', ()=>goto(13));
-      if(n2) n2.addEventListener('click', resetState);
-    }
-  }
-
-  // Étape 3 — Marque : mise à jour immédiate pour activer "Suivant"
-  if(et===3){
-    const sel = document.getElementById('marque');
-    if(sel){
-      sel.addEventListener('change', ()=>{
-        state.vehicule.marque = sel.value || '';
-        // Si la marque change, on réinitialise le modèle
-        state.vehicule.modele = '';
-        saveState();
-        render();
-      });
-    }
-  }
-
-  // Étape 4 — Modèle : mise à jour immédiate pour activer "Suivant"
-  if(et===4){
-    const sel = document.getElementById('modele');
-    if(sel){
-      sel.addEventListener('change', ()=>{
-        state.vehicule.modele = sel.value || '';
-        saveState();
-        render();
-      });
-    }
-  }
-
-  function toast(msg){
-    try{
-      const t = document.createElement('div');
-      t.textContent = msg;
-      t.style.position='fixed';
-      t.style.left='50%';
-      t.style.bottom='88px';
-      t.style.transform='translateX(-50%)';
-      t.style.background='#111827';
-      t.style.color='#fff';
-      t.style.padding='10px 12px';
-      t.style.borderRadius='999px';
-      t.style.fontWeight='800';
-      t.style.zIndex='99999';
-      document.body.appendChild(t);
-      setTimeout(()=>t.remove(), 1800);
-    }catch{}
-  }
-
-  async function fileToDataUrl(file){
-    return await new Promise((resolve, reject)=>{
-      const r = new FileReader();
-      r.onload = ()=>resolve(r.result);
-      r.onerror = ()=>reject(new Error('Lecture photo impossible'));
-      r.readAsDataURL(file);
-    });
-  }
-
-  window.addEventListener('load', function(){
-    try{
-      if(!state || !state.version) state = loadState();
-      // compat : certaines versions utilisaient "etape" par erreur.
-      if(state.etape && !state.step) state.step = state.etape;
-      if(!state.step) state.step = 1;
+  function validateImmat(){
+    const el = $("#immat");
+    if(el){
+      state.immat_raw = el.value;
+      const n = normalizeImmat(el.value);
+      state.immat = n.formatted;
       saveState();
-      render();
-    }catch(e){
-      showFatal(e && e.message ? e.message : String(e));
     }
-  });
+    if(!state.immat){
+      return { ok:false, msg:"Saisir une immatriculation valide (AA-123-AA)." };
+    }
+    return { ok:true };
+  }
+
+  function renderKm(){
+    return `
+      <h2>Kilométrage</h2>
+      <label>Km (obligatoire)</label>
+      <input id="km" inputmode="numeric" placeholder="Ex: 139634" value="${escapeHtml(state.km || "")}" />
+      <div class="help">Saisir uniquement des chiffres.</div>
+      ${btnBar()}
+    `;
+  }
+
+  function validateKm(){
+    const el = $("#km");
+    if(el){
+      const v = el.value.replace(/[^\d]/g,"");
+      if(v !== el.value) el.value = v;
+      state.km = v;
+      saveState();
+    }
+    if(!state.km || state.km.length < 2){
+      return { ok:false, msg:"Saisir un kilométrage." };
+    }
+    return { ok:true };
+  }
+
+  function renderMarque(){
+    const options = Object.keys(BRANDS)
+      .sort((a,b)=>a.localeCompare(b,"fr"))
+      .map(b => `<option value="${escapeAttr(b)}" ${b===state.marque?"selected":""}>${escapeHtml(b)}</option>`)
+      .join("");
+    return `
+      <h2>Marque</h2>
+      <label>Choisir la marque</label>
+      <select id="marque">
+        <option value="" ${state.marque ? "" : "selected"}>—</option>
+        ${options}
+      </select>
+      ${btnBar()}
+    `;
+  }
+
+  function validateMarque(){
+    const el = $("#marque");
+    if(el){
+      const prev = state.marque;
+      state.marque = el.value || "";
+      if(state.marque !== prev) state.modele = "";
+      saveState();
+    }
+    if(!state.marque){
+      return { ok:false, msg:"Sélectionner une marque." };
+    }
+    return { ok:true };
+  }
+
+  function renderModele(){
+    const brand = state.marque || "";
+    const models = BRANDS[brand] || ["AUTRE"];
+    const options = models.map(m => `<option value="${escapeAttr(m)}" ${m===state.modele?"selected":""}>${escapeHtml(m)}</option>`).join("");
+    return `
+      <h2>Modèle</h2>
+      <label>Choisir le modèle</label>
+      <select id="modele">
+        <option value="" ${state.modele ? "" : "selected"}>—</option>
+        ${options}
+      </select>
+      ${btnBar()}
+    `;
+  }
+
+  function validateModele(){
+    const el = $("#modele");
+    if(el){
+      state.modele = el.value || "";
+      saveState();
+    }
+    if(!state.modele){
+      return { ok:false, msg:"Sélectionner un modèle." };
+    }
+    return { ok:true };
+  }
+
+  function renderMecano(){
+    const v = state.mecano || "SYLVAIN";
+    return `
+      <h2>Mécano</h2>
+      <label>Choisir le mécano</label>
+      <select id="mecano">
+        <option value="SYLVAIN" ${v==="SYLVAIN"?"selected":""}>SYLVAIN</option>
+        <option value="AUTRE" ${v==="AUTRE"?"selected":""}>AUTRE</option>
+      </select>
+      ${btnBar()}
+    `;
+  }
+
+  function validateMecano(){
+    const el = $("#mecano");
+    if(el){
+      state.mecano = el.value || "SYLVAIN";
+      saveState();
+    }
+    if(!state.mecano){
+      return { ok:false, msg:"Sélectionner un mécano." };
+    }
+    return { ok:true };
+  }
+
+  function render100(){
+    return `
+      <h2>100 points de contrôle</h2>
+      <label>
+        <input id="p100" type="checkbox" ${state.p100_done ? "checked" : ""} />
+        100 points effectués (obligatoire)
+      </label>
+      <div class="help">Cette étape est obligatoire pour continuer.</div>
+      ${btnBar()}
+    `;
+  }
+
+  function validate100(){
+    const el = $("#p100");
+    if(el){
+      state.p100_done = !!el.checked;
+      saveState();
+    }
+    if(!state.p100_done){
+      return { ok:false, msg:"Cocher “100 points effectués”." };
+    }
+    return { ok:true };
+  }
+
+  function renderPhotos(){
+    return `
+      <h2>Photos</h2>
+      <div class="help">iOS compatible : ouvre le sélecteur/caméra selon l’appareil.</div>
+      ${photoRow("A5 (fiche)", "a5")}
+      ${photoRow("OR (ordre de réparation)", "or")}
+      ${photoRow("BL (page 1)", "bl1")}
+      ${btnBar()}
+    `;
+  }
+
+  function photoRow(label, key){
+    const has = !!(state.photos && state.photos[key]);
+    const preview = has ? `<img alt="preview" src="${state.photos[key]}" style="max-width:100%;border-radius:12px;border:1px solid var(--border);margin-top:8px" />` : "";
+    return `
+      <label>${escapeHtml(label)}</label>
+      <input type="file" accept="image/*" capture="environment" id="photo_${escapeAttr(key)}" />
+      <div class="help">${has ? "✅ Photo enregistrée" : "Aucune photo"}</div>
+      ${preview}
+      <div style="height:10px"></div>
+    `;
+  }
+
+  function validatePhotos(){
+    return { ok:true };
+  }
+
+  function renderRecap(){
+    const photosCount = ["a5","or","bl1"].filter(k => state.photos && state.photos[k]).length;
+    return `
+      <h2>Récap</h2>
+      <div class="kv">
+        <span class="badge">Véhicule : OK</span>
+        <span class="badge">${state.p100_done ? "100 points : OK" : "100 points : KO"}</span>
+        <span class="badge gray">Photos : ${photosCount}/3</span>
+      </div>
+      <pre>${escapeHtml(JSON.stringify({
+        immat: state.immat,
+        km: state.km,
+        marque: state.marque,
+        modele: state.modele,
+        mecano: state.mecano,
+        p100_done: state.p100_done,
+        photos: photosCount
+      }, null, 2))}</pre>
+
+      <div class="btnbar">
+        <button class="btn secondary" id="btnPrev">Retour</button>
+        <button class="btn primary" id="btnNext">Terminer</button>
+      </div>
+      <div class="help">“Terminer” revient à l’immatriculation (sans effacer).</div>
+      <div class="error" id="errBox" style="display:none"></div>
+    `;
+  }
+
+  async function fileToDataUrl(file, maxW){
+    const img = await loadImage(file);
+    const canvas = document.createElement("canvas");
+    const ratio = img.width > maxW ? (maxW / img.width) : 1;
+    canvas.width = Math.round(img.width * ratio);
+    canvas.height = Math.round(img.height * ratio);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  }
+
+  function loadImage(file){
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = reject;
+      img.src = url;
+    });
+  }
+
+  function escapeHtml(str){
+    return safeText(str)
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+  function escapeAttr(str){
+    return escapeHtml(str).replaceAll('"',"&quot;");
+  }
+
+  render();
+
 })();
